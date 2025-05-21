@@ -1,0 +1,3972 @@
+#-------------------------VERSION CONTROL AND NOTES-----------------------------
+## Version#  [date]        [Version Author]    [Email]             [Phone]
+# 1.0       2025-02-28    Andrew Beggs       abeggs@oig.doc.gov  202-793-2975
+# 
+# Warranty not given; code can contain mistakes, perform unexpectedly, or not
+# produce expected results. Always do manual spot-checks and verify program
+# is functioning as intended. Though functional, this code should be considered
+# a work in progress.
+# For any significant code errors, report to Andrew Beggs at the above email 
+# and/or phone number.
+
+## .............................................................................
+## ..                   Version History and Revision Notes                    ..
+## .............................................................................
+## Version # Notes =
+##
+## Version#  [date]        [Version Author]    [Email]             [Phone]
+## _____________________________________________________________________________
+# 1.0 Notes = A. Beggs initial creation of script based on work done at DOC-OIG|
+#                                                                              |
+# 1.0       2025-02-28    A. Beggs            abeggs@oig.doc.gov  202-793-2975 |
+## ____________________________________________________________________________|
+
+#----------------------INSTALL AND LOAD LIBRARIES-------------------------------
+
+# https://towardsdatascience.com/fastest-way-to-install-load-libraries-in-r-f6fd56e3e4c4
+# using the 3rd method: "apply" method here
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+listofpackages <- c("stringr","tibble","xml2","tidyverse","curl","crul","R6",
+                    "urltools","httpcode","jsonlite","ckanr","purrr","httr",
+                    "glue","lintr","styler","microbenchmark")
+
+ipak(listofpackages)
+
+#---------------------------------CODE------------------------------------------
+
+# 1: Set Working Directory------------------------------------------------------
+setwd("YOUR_Directory_Here")
+# Note: R uses forward slash / for paths not backslash \ like in Explorer
+# So, can copy and paste from explorer but then replace backs with forward slash
+mdff <- paste0(getwd(),"/MDFiles/")
+
+fileindexer <- as.integer(1)
+
+# 1.1: Read in the FGDC-endorsed NGDA list--------------------------------------
+
+# Note: this requires the user to download the CSV from FGDC website and place
+# in the same directory as the above working directory. Otherwise, if this CSV
+# is in a different location, just append the directory to the filename
+
+# FGDC CSV File Source:
+# https://ngda-portfolio-community-geoplatform.hub.arcgis.com/pages/portfolio
+# Click on the "Actions" icon (far, upper-right corner of the pane),
+# Navigate the drop-down to "export," and click the "Export to csv" option.
+
+# Optionally: rename your file but ensure that the renamed file matches
+# what you place below in the quotes.
+officialngdalist <- read.csv("20241010_Official_List_NGDA_Endorsed_by_FGDC.csv",
+                             header = TRUE
+)
+# Cleanup on the CSV:
+# Remove all trailing and leading whitespaces (but not spaces inside values)
+officialngdalist <- as.data.frame(lapply(officialngdalist, trimws))
+# Repair Department values where "U.S.abc" vs. "U.S. abc": (a space expected)
+officialngdalist$Department <- str_replace(officialngdalist$Department,
+                                           "^[Uu]\\.[Ss]\\.(?=\\b[A-Za-z].+)",
+                                           "U\\.S\\. ")
+# Other repairs go here:
+
+
+# 2: Setup CKAN Package with API URL and Key------------------------------------
+datagov_url <- "https://catalog.data.gov/"
+api_key <- "demo"
+# To get your own API key, visit: https://api.data.gov/signup/
+# Once the key arrives via email, it should be in the form of a 40-char string
+# containing numbers and letters (upper and lowe case)
+
+ckanr_setup(url = datagov_url, key = api_key)
+
+# 3: Setup API query and query filter-------------------------------------------
+query <- "metadata_type:geospatial"
+# qfilter <- "organization_type=Federal+Government"
+qfilter <- list("", "metadata_type:geospatial", "tags:ngda", "tags:ngdaid*")
+# Note: other filters can be used, such as:
+# "tags:ngda" or "tags:ngdaid*" to limit the search to only NGDA data sets / 
+# data sets tagged with a string like: NGDAID###
+
+# 4: Setup GDA Covered Agencies (Departments)-----------------------------------
+gdadepts <- c('U.S. Department of Agriculture',
+              'U.S. Department of Commerce',
+              'U.S. Department of Education',
+              'U.S. Department of Energy',
+              'U.S. Department of Health and Human Services',
+              'U.S. Department of Homeland Security',
+              'U.S. Department of Housing and Urban Development',
+              'U.S. Department of Justice',
+              'U.S. Department of Labor',
+              'U.S. Department of State',
+              'U.S. Department of the Interior',
+              'U.S. Department of Transportation',
+              'U.S. Department of the Treasury',
+              'U.S. Department of Veterans Affairs',
+              'National Aeronautics and Space Administration',
+              'General Services Administration')
+
+dgov_orgs <- c('usda-gov',
+               'doc-gov','noaa-gov','census-gov',
+               'national-institute-of-standards-and-technology',
+               'national-telecommunications-and-information-administration',
+               'ed-gov',
+               'doe-gov',
+               'hhs-gov',
+               'dhs-gov','fema-gov',
+               'hud-gov',
+               'doj-gov',
+               'dol-gov','u-s-department-of-labor-bureau-of-labor-statistics',
+               'state-gov',
+               'doi-gov','usgs-gov',
+               'dot-gov','ntsb-gov',
+               'treasury-gov',
+               'va-gov',
+               'nasa-gov',
+               'gsa-gov')
+
+labl <- length(dgov_orgs)
+
+gda_counts <- data.frame("all" = double(labl), "geospatial" = 0, "geo_ngda" = 0,
+                         "geo_ngdaid" = 0, row.names = dgov_orgs)
+
+for (i in 1:length(dgov_orgs)) {
+  ovctdata <-
+    package_search(
+      q = paste0("organization:", dgov_orgs[[i]]) , fq = qfilter[1],
+      rows = 0, start = 0)
+  gda_counts[[i, 1]] <- ovctdata$count
+  rm(ovctdata)
+  
+  ovctgeodata <-
+    package_search(
+      q = paste0("organization:", dgov_orgs[i]),
+      fq = qfilter[2], rows = 0, start = 0
+    )
+  gda_counts[[i, 2]] <- ovctgeodata$count
+  rm(ovctgeodata)
+  
+  ovctngdadata <-
+    package_search(
+      q = paste0("organization:", dgov_orgs[i]),
+      fq = qfilter[3], rows = 0, start = 0
+    )
+  gda_counts[[i, 3]] <- ovctngdadata$count
+  rm(ovctngdadata)
+  
+  ovctngdaiddata <-
+    package_search(
+      q = paste0("organization:", dgov_orgs[i]),
+      fq = qfilter[4], rows = 0, start = 0
+    )
+  gda_counts[[i, 4]] <- ovctngdaiddata$count
+  rm(ovctngdaiddata)
+}
+
+# Create new list subsetted to where we have geospatial data only:
+dgov_orgs1 <- dgov_orgs[gda_counts$geospatial > 0]
+# Determine how many agencies we are examining:
+l_abl <- length(dgov_orgs1)
+# API call to be between 1 and 1000 (i.e., the API's row limit)
+# And no, I checked: 1000 is the max we are allowed to do (structural thing)
+rowlimit <- as.integer(1000)
+# Establish the round number of batches per agency:
+batches <- cbind(gda_counts, agency = dgov_orgs) %>% select(geospatial,agency) %>% 
+  filter(geospatial > 0) %>% 
+  arrange(geospatial) %>% 
+  mutate(num_api_calls = ifelse(geospatial >= rowlimit, 
+                                as.integer(ceiling(geospatial / rowlimit)), 
+                                ifelse(geospatial<rowlimit, as.integer(1), 
+                                       as.integer(0))))
+# Set overall number of batches:
+num_batches <- sum(batches$num_api_calls)
+
+# recall number of batches from batches based on a given agency:
+# batches[str_detect(batches$agency,"noaa-gov"),3]
+
+# Other notables covered by GDA but have no data:
+# national-institute-of-standards-and-technology
+# national-telecommunications-and-information-administration
+# u-s-department-of-labor-bureau-of-labor-statistics
+
+# Other, federal organizations (note: not comprehensive list)
+# Need to figure out how to ask the API to provide both the organization
+# and then filter by "additional info" of organization_type:Federal Government
+
+# fgdc-gov
+# https://catalog.data.gov/organization/fgdc-gov
+# federal-laboratory-consortium
+# https://catalog.data.gov/organization/federal-laboratory-consortium
+# fhfa-gov
+# https://catalog.data.gov/organization/fhfa-gov
+# library-of-congress
+# https://catalog.data.gov/organization/library-of-congress
+# nara-gov
+# https://catalog.data.gov/organization/nara-gov
+# nsf-gov
+# https://catalog.data.gov/organization/nsf-gov
+# nrc-gov
+# https://catalog.data.gov/organization/nrc-gov
+# office-of-management-and-budget
+# https://catalog.data.gov/organization/office-of-management-and-budget
+# opm-gov
+# https://catalog.data.gov/organization/opm-gov
+# sba-gov
+# https://catalog.data.gov/organization/sba-gov
+# ssa-gov
+# https://catalog.data.gov/organization/ssa-gov
+# usaid-gov
+# https://catalog.data.gov/organization/usaid-gov
+# epa-gov
+# https://catalog.data.gov/organization/epa-gov
+# 
+
+# List out all unique Departments that have NGDA:
+ngdadepts <- unique(officialngdalist$Department)
+# e.g., this includes DOD and EPA (potentially others)
+
+# Subset the list of unique Departments that have NGDA also covered by GDA,
+# resulting in a list of GDA-covered agencies with NGDA:
+gdadept_ngda <- ngdadepts[ngdadepts %in% gdadepts]
+# in other words: exclude DOD and/or other agencies (e.g., EPA)
+
+# Create list of NGDA themes across the Federal space:
+ngdathemes <- unique(officialngdalist$NGDA_Theme)
+
+ngdalist <- unique(officialngdalist$NGDA.Title)
+
+# 5: Pull Filter (1: All, 2: Geospatial, 3: NGDA-tagged, 4: NGDAID*-tagged)-----
+# pull_filter corresponds to the qfilter variable above and sets the API filter
+# when the script calls out looking for data (and setting the ceilings for how
+# much data to pull: datapull_lim).
+pull_filter <- as.integer(2)
+
+# 6: Initialize how much data exists based on the prior steps via API calls-----
+datapull_lim <- as.integer(sum(gda_counts$geospatial))
+# datapull_lim is set the API tells us how much geospatial data exists, based on
+# the gda_counts data frame initialized above in step #4
+
+# 7: Set datapull_lim based on counts of geospatial data obtained in 6----------
+# Using pull_filter here too to set the row-value pair
+# datapull_lim <- as.integer(ovctdata$count)
+
+# 8: Display the number of proposed data to pull to the user--------------------
+num_ds <- format(round(as.numeric(datapull_lim)), nsmall = 0, big.mark = ",")
+print(paste0("The Data.gov API identified ", num_ds, 
+             " federal geospatial data sets marked as metadata_type=geospatial."
+))
+
+# 9: Setup the variables to be used during the API call, scan, & analyze--------
+
+# Temporary, empty char-type results vector to pre-fill the tables
+res_hold <- vector(mode = "character", length = datapull_lim)
+res_holdl <- vector(mode = "logical", length = datapull_lim)
+res_holdi <- vector(mode = "integer", length = datapull_lim)
+
+
+# 9.1: api_MDfiles--------------------------------------------------------------
+# api_MDFiles holds the Data.gov MD-Download Link and syncs with api_results
+# and api_qcresults on the RunID column (variable: x)
+# type: tibble (i.e., matrix)
+# size: 10 by datapull_lim (& via res_hold)
+
+# Column Keys:
+# RunID = sequentially serializes the data from the API (from 1 to datapull_lim)
+# NGDAID = if known, attempts to place the NGDAID from the tags
+# AgencyBureau = adds the name of the bureau here
+# DS_Title = a given data set's title
+# Webpage = Data.gov webpage of the geospatial dataset
+# MD_Link = Link to the Data.gov webpage for the metadata record (if it exists)
+# MD_DownloadedFlag = QC flag on if MD_Link exists
+# MD_OriginLink = Attempt 1 to reconstitute an origin metadata record
+# MD_OriginLink2 = Attempt 2 to reconstitute an origin metadata record
+# MD_OriginPage = Attempt to reconstitute an origin webpage for the dataset
+
+api_MDfiles <- tibble(
+  "RunID" = 1:datapull_lim,
+  "NGDAID" = 0,
+  "AgencyBureau" = res_hold,
+  "DS_Title" = res_hold,
+  "Webpage" = res_hold,
+  "MD_Link" = res_hold,
+  "MD_DownloadedFlag" = res_hold,
+  "MD_OriginLink" = res_hold,
+  "MD_OriginLink2" = res_hold,
+  "MD_OriginPage" = res_hold
+)
+# 9.2: api_results--------------------------------------------------------------
+# api_results holds all information gleaned from the API calls
+# Syncs with api_MDfiles and api_qcresults on the RunID column (var: x)
+# type: tibble (i.e., matrix)
+# size: 27 by datapull_lim (& via res_hold)
+#
+# RunID = sequentially serializes the data from the API (from 1 to datapull_lim)
+# NGDAID = if known, attempts to place the NGDAID from the tags
+# AgencyBureau = adds the name of the bureau here
+# Title = a given data set's title (same as DS_Title in api_MDfiles)
+# Abstract = a given data set's abstract (i.e., the notes field in the API)
+# ProgressCode = status of the data set
+# FreqofUpdate = a given data set's update frequency
+# Publication Date (Data) = a given data set's publication date
+# Creation Date (Data) = a given data set's creation date (brought to existence)
+# Last Update Date (Data) = a given data set's latest update (or revision) date
+# Temporalextent_begin = defining temporal start position of data set
+# Temporalextent_end = defining temporal start position of data set (if known)
+# Bbox_east_long = bounding box east line in longitude
+# Bbox_north_lat = bounding box north line in latitude
+# Bbox_south_lat = bounding box south line in latitude
+# Bbox_west_long = bounding box west line in longitude
+# Publication Date (Metadata) = the metadata (assoc. with data set) publish date
+# Last Update Date (Metadata) = the metadata (assoc. with data set) update date
+# Citation Identifier = Metadata-specific identifier (like a unique ID)
+# Metadata Identifier = Metadata-specific pointer (may be used in origin links)
+# Reference System Identifier = geospatial reference system of the data set
+# Download URL = the data set's download URL (if known)
+# Web Service Name = the data set's web service name (if known)
+# Web Service description = the data set's web service description (if known)
+# Web Service URL = the data set's web service URL (if known)
+# Keywords = Copies over Data.gov's existing tags as keywords
+# Keywords-NGDATheme = Extracts the NGDA Theme (if dataset is NGDA), otherwise
+#                      will attempt to use the "category" tag from Data.gov
+# Keywords-Duplicates = If they exist, a repository for the duplicate keywords
+
+api_results <- tibble(
+  "RunID" = 1:datapull_lim,
+  "NGDAID" = 0,
+  "AgencyBureau" = res_hold,
+  "Title" = res_hold,
+  "Abstract" = res_hold,
+  "ProgressCode" = res_hold,
+  "FreqofUpdate" = res_hold,
+  "RespParty-RoleCode" = res_hold,
+  "Publication Date (Data)" = res_hold,
+  "Creation Date (Data)" = res_hold,
+  "Last Update Date (Data)" = res_hold,
+  "Temporalextent_begin" = res_hold,
+  "Temporalextent_end" = res_hold,
+  "Bbox_east_long" = double(datapull_lim),
+  "Bbox_north_lat" = double(datapull_lim),
+  "Bbox_south_lat" = double(datapull_lim),
+  "Bbox_west_long" = double(datapull_lim),
+  "Publication Date (Metadata)" = res_hold,
+  "Last Update Date (Metadata)" = res_hold,
+  "Citation Identifier" = res_hold,
+  "Metadata Identifier" = res_hold,
+  "Reference System Identifier" = res_hold,
+  "Download URL" = res_hold,
+  "Web Service Name" = res_hold,
+  "Web Service description" = res_hold,
+  "Web Service URL" = res_hold,
+  "Keywords" = res_hold,
+  "Keywords-NGDA" = res_hold,
+  "Keywords-Duplicates" = res_hold,
+  "Keywords-MultiWords" = res_hold,
+  "Keywords-Punctuation" = res_hold
+)
+# 9.3: api_qcresults------------------------------------------------------------
+# api_qcresults holds all quality-related information about the API's data for
+# a given data set / record. Syncs with api_MDfiles and api_results on the 
+# RunID column (var: x)
+# type: tibble (i.e., matrix)
+# size: 97 by datapull_lim (& via res_hold)
+#
+# RunID = sequentially serializes the data from the API (from 1 to datapull_lim)
+# NGDAID = if known, attempts to place the NGDAID from the tags
+# AgencyBureau = adds the name of the bureau here
+# Title = a given data set's title (same as DS_Title in api_MDfiles)
+# QC-Score = aggregate score across all elements tested
+# ...Remaining columns  are best examined when they are called in the code below
+
+api_qcresults <- tibble(
+  "RunID" = 1:datapull_lim,
+  "NGDAID" = 0,
+  "AgencyBureau" = res_hold,
+  "Title" = res_hold,
+  "Data-Gov-Webpage" = res_hold,
+  "QC-Score" = res_holdi,
+  "Title-Check" = res_holdl,
+  "Title-Score" = 0,
+  "Abstract-Check" = res_holdl,
+  "Abstract-Score" = 0,
+  "RespParty-Check" = res_holdl,
+  "RespParty-Score" = 0,
+  "ProgressCode-Valid" = res_holdl,
+  "ProgressCode-Score" = 0,
+  "FreqofUpdate-Valid" = res_holdl,
+  "FreqofUpdate-Score" = 0,
+  "D-PubDate-Exists" = res_holdl,
+  "D-PubDate-Format" = res_hold,
+  "D-PubDate-FutureDate" = res_holdl,
+  "D-PubDate-Valid" = res_holdl,
+  "D-PubDate-BeforeCreateDate" = res_holdl,
+  "D-PubDate-QC-Score" = 0,
+  "D-CreateDate-Exists" = res_holdl,
+  "D-CreateDate-Format" = res_hold,
+  "D-CreateDate-FutureDate" = res_holdl,
+  "D-CreateDate-Valid" = res_holdl,
+  "D-CreateDate-QC-Score" = 0,
+  "D-LUpDate-Exists" = res_holdl,
+  "D-LUpDate-Format" = res_hold,
+  "D-LUpDate-FutureDate" = res_holdl,
+  "D-LUpDate-Valid" = res_holdl,
+  "D-LUpDate-BeforePubDate" = res_holdl,
+  "D-LUpDate-BeforeCreateDate" = res_holdl,
+  "D-LUpDate-QC-Score" = 0,
+  "D-TEBegin-Exists" = res_holdl,
+  "D-TEBegin-Format" = res_hold,
+  "D-TEBegin-FutureDate" = res_holdl,
+  "D-TEBegin-Valid" = res_holdl,
+  "D-TEBegin-Value-Before-CreateDate" = res_holdl,
+  "D-TEBegin-QC-Score" = 0,
+  "D-TEEnd-Exists" = res_holdl,
+  "D-TEEnd-Format" = res_hold,
+  "D-TEEnd-FutureDate" = res_holdl,
+  "D-TEEnd-Valid" = res_holdl,
+  "D-TEEnd-Value-Before-TEBeginDate" = res_holdl,
+  "D-TEEnd-Value-After-LUpDate" = res_holdl,
+  "D-TEEnd-QC-Score" = 0,
+  "Bbox-Exists-x4" = res_holdl,
+  "Bbox_east_long-withinBounds" = res_holdl,
+  "Bbox_north_lat-withinBounds" = res_holdl,
+  "Bbox_south_lat-withinBounds" = res_holdl,
+  "Bbox_west_long-withinBounds" = res_holdl,
+  "Bbox-Score" = 0,
+  "MD-PubDate-Exists" = res_holdl,
+  "MD-PubDate-Format" = res_hold,
+  "MD-PubDate-FutureDate" = res_holdl,
+  "MD-PubDate-Valid" = res_holdl,
+  "MD-PubDate-QC-Score" = 0,
+  "MD-LUpDate-Exists" = res_holdl,
+  "MD-LUpDate-Format" = res_hold,
+  "MD-LUpDate-FutureDate" = res_holdl,
+  "MD-LUpDate-Valid" = res_holdl,
+  "MD-LUpDate-BeforeMDPubDate" = res_holdl,
+  "MD-LUpDate-QC-Score" = 0,
+  "CitationID-Exists" = res_holdl,
+  "CitationID-Score" = 0,
+  "MetadataID-Exists" = res_holdl,
+  "MetadataID-Score" = 0,
+  "Reference_System_Identifier-Exists" = res_holdl,
+  "RefSysID-Score" = 0,
+  "MD-DownloadURL-Exists" = res_holdl,
+  "MD-DownloadURL-Score" = 0,
+  "D-Download_URL-Exists" = res_holdl,
+  "D-DownloadURL-Score" = 0,
+  "Web_Service_Name-Exists" = res_holdl,
+  "Web_Service_Description-Exists" = res_holdl,
+  "Web_Service_URL-Exists" = res_holdl,
+  "Web_Service-Score" = 0,
+  "Keywords-Exist" = res_holdl,
+  "Keywords-TagCount" = res_holdi,
+  "Keywords-WordCount" = res_holdi,
+  "Keywords-Duplicated" = res_holdl,
+  "Keywords-Duplicates" = res_holdi,
+  "Keywords-DupedWords" = res_holdi,
+  "Keywords-UniqueWords" = res_holdi,
+  "Keywords-Punctuation" = res_holdl,
+  "Keywords-PunctuationMarkCount" = res_holdi,
+  "Keywords-PunctuatedNumTags" = res_holdi,
+  "Keywords-MultipleWords" = res_holdl,
+  "Keywords-MultiWordTagCount" = res_holdi,
+  "Keywords-MultiWordCount" = res_holdi,
+  "Keywords-NGDA" = res_holdl,
+  "Keywords-NationalGeospatialDataAsset" = res_holdl,
+  "Keywords-NGDATheme" = res_holdl,
+  "Keywords-NGDAID#" = res_holdl,
+  "Keywords-Score" = 0
+)
+
+# Create some lists to house results/record from the datevalidation function:
+# mdpubdateqc <- vector(mode = "list", length = datapull_lim)
+# mdlupdateqc <- vector(mode = "list", length = datapull_lim)
+# dpubdateqc <- vector(mode = "list", length = datapull_lim)
+# dcreatedateqc <- vector(mode = "list", length = datapull_lim)
+# dlupdateqc <- vector(mode = "list", length = datapull_lim)
+# tebeginqc <- vector(mode = "list", length = datapull_lim)
+# teendqc <- vector(mode = "list", length = datapull_lim)
+keywordqc <- vector(mode = "list", length = datapull_lim)
+
+# 10: Define Regular Expressions (REGEX)----------------------------------------
+# This section defines various regular expressions (REGEX) used in detecting
+# patterns within data (i.e., within strings/character arrays)
+#
+# REGEX with allowed lists (e.g., ProgressCode) are useful in filtering a data
+# source (a string/character array) into two bins: allowed (REGEX matches)
+# and disallowed (REGEX fails)
+
+# 10.1: Date REGEX--------------------------------------------------------------
+
+# 10.1.1-A: Date Format Assumption(s)-------------------------------------------
+# We assume, for the purposes of this script, that dates will be presented in
+# a semi-standardized format. We make most reasonable attempts to identify a
+# date by only searching in date fields and following standard conventions while
+# making some allowances for variations or mixed formats.
+# 
+# While this is not an exhaustive list, we commonly anticipate dates in formats
+# like ISO standard 8601:
+# YYYY-MM-DDTHH:MM:SS+00:00
+# YYYY-MM-DDTHH:MM:SS.123456Z
+# YYYY-MM-DD
+# YYYY-MM
+# YYYY
+# 
+# And some less common variants, like:
+# 
+# MM-YYYY
+# MM-DD-YYYY
+# DD-MM-YYYY
+# YYYY-MM-DDTHH:MM
+# 
+# And even some variants with words or 3-letter phrases to represent months, ex:
+# 
+# JAN-YYYY
+# JAN-31-YYYY
+# 31-JAN-YYYY
+# January-YYYY
+# January-31-YYYY
+# 31-January-YYYY
+# 
+# Correspondingly, we wrote regular expressions to detect dates across a wide
+# range of potential variability (see 10.1.2 below for more specifics).
+
+# 10.1.2: date_regex------------------------------------------------------------
+# We constructed this date_regex to be intentionally broad; it attempts to match
+# with any possible date in formats assumed above (i.e., Y-M-D or M-D-Y).
+# 
+# Important note: This can pattern match dates but it CANNOT tell you what the
+# format of the date itself. Knowing the date format helps target appropriate
+# validation testing for the particular fields but the first step (this step)
+# is identifying that a data field is, in fact, a date (Y-M-D or M-D-Y).
+# 
+# This pattern matching can happen both on a field only containing a date
+# and within a longer string that may contain a date (e.g. an abstract field).
+# 
+# Note: this REGEX is so broadly written that it effectively "ingores" separator
+# differences and only is really searching for the longest possible match to its
+# given baseline "date" pattern. For example, it can find dates even if the data
+# field uses different, amounts, and/or combinations of separators, like:
+# YYYY,MM;-DD~HH..MM\SS 00|00 (will still match)
+# YYYY'MM_DD>HH;MM-SS/123456 (will still match)
+# 
+# Any and all combinations of the above separators should work because we used
+# used word boundary detection "\\b" flags paired with wildcard "." characters 
+# but limited that searching to within our expected date formats.
+# 
+# This expression accomplishes matching by looking for a pattern of digits in a
+# arrangement. Then the REGEX uses an "unfolding" method to try and match the 
+# longest possible date value given whatever may actually be present. 
+# In practice, dates examined thus far are either YYYY, YYYY-MM, or ISO8601 date
+# 
+# However, using this larger logical structure ensures we retain flexibility 
+# to addressing edge cases, improvements in date formatting, and handling edge
+# cases.
+# 
+# Known / tested cases where date_regex can both handle (i.e., "recognize" or 
+# otherwise match on and extract values) for dates in formats like:
+# 
+# YYYY-MM-DDTHH:MM:SS+00:00
+# YYYY-MM-DDTHH:MM:SS+00:00Z
+# YYYY-MM-DDTHH:MM:SS + 00:00
+# YYYY-MM-DDTHH:MM:SS + 00:00Z
+# YYYY-MM-DDTHH:MM:SS.123456
+# YYYY-MM-DDTHH:MM:SS.123456Z
+# YYYY-MM-DDTHH:MM:SS123456
+# YYYY-MM-DDTHH:MM:SS123456Z
+# YYYY-MM-DDTHH:MM:SS
+# YYYY-MM-DDTHH:MM:SSZ
+# YYYY-MM-DDTHH:MM
+# YYYY-MM-DDTHH:MMZ
+# YYYY-MM-DDTHHMM
+# YYYY-MM-DDTHHMMZ
+# YYYY-MM-DD HH:MM:SS+00:00
+# YYYY-MM-DD HH:MM:SS+00:00Z
+# YYYY-MM-DD HH:MM:SS + 00:00
+# YYYY-MM-DD HH:MM:SS + 00:00Z
+# YYYY-MM-DD HH:MM:SS.123456
+# YYYY-MM-DD HH:MM:SS.123456Z
+# YYYY-MM-DD HH:MM:SS123456
+# YYYY-MM-DD HH:MM:SS123456Z
+# YYYY-MM-DD HH:MM:SS
+# YYYY-MM-DD HH:MM:SSZ
+# YYYY-MM-DD HH:MM
+# YYYY-MM-DD HH:MMZ
+# YYYY-MM-DD HHMM
+# YYYY-MM-DD HHMMZ
+# YYYY-MM-DD
+# YYYY-MM
+# YYYY
+# YYY
+# YY
+# Y
+# MM-YYYY
+# MM-DD-YYYY
+# MM-DD-YYYYTHHMM
+# MM-DD-YYYYTHHMMZ
+# MM-DD-YYYYTHH:MM
+# MM-DD-YYYYTHH:MMZ
+# MM-DD-YYYYTHH:MM:SS
+# MM-DD-YYYYTHH:MM:SSZ
+# MM-DD-YYYYTHH:MM:SS123456
+# MM-DD-YYYYTHH:MM:SS123456Z
+# MM-DD-YYYYTHH:MM:SS.123456
+# MM-DD-YYYYTHH:MM:SS.123456Z
+# MM-DD-YYYYTHH:MM:SS + 00:00
+# MM-DD-YYYYTHH:MM:SS + 00:00Z
+# MM-DD-YYYYTHH:MM:SS+00:00
+# MM-DD-YYYYTHH:MM:SS+00:00Z
+# MM-DD-YYYY HH:MM
+# MM-DD-YYYY HH:MMZ
+# MM-DD-YYYY HHMM
+# MM-DD-YYYY HHMMZ
+# MM-DD-YYYY HH:MM:SS
+# MM-DD-YYYY HH:MM:SSZ
+# MM-DD-YYYY HH:MM:SS123456
+# MM-DD-YYYY HH:MM:SS123456Z
+# MM-DD-YYYY HH:MM:SS.123456
+# MM-DD-YYYY HH:MM:SS.123456Z
+# MM-DD-YYYY HH:MM:SS + 00:00
+# MM-DD-YYYY HH:MM:SS + 00:00Z
+# MM-DD-YYYY HH:MM:SS+00:00
+# MM-DD-YYYY HH:MM:SS+00:00Z
+# DD-MM-YYYYTHH:MM:SS123456
+# DD-MM-YYYYTHH:MM:SS123456Z
+# DD-MM-YYYYTHH:MM:SS.123456
+# DD-MM-YYYYTHH:MM:SS.123456Z
+# DD-MM-YYYYTHH:MM:SS+00:00
+# DD-MM-YYYYTHH:MM:SS+00:00Z
+# DD-MM-YYYYTHH:MM:SS + 00:00
+# DD-MM-YYYYTHH:MM:SS + 00:00Z
+# DD-MM-YYYYTHH:MM:SS
+# DD-MM-YYYYTHH:MM:SSZ
+# DD-MM-YYYYTHH:MM
+# DD-MM-YYYYTHH:MMZ
+# DD-MM-YYYY HH:MM:SS123456
+# DD-MM-YYYY HH:MM:SS123456Z
+# DD-MM-YYYY HH:MM:SS.123456
+# DD-MM-YYYY HH:MM:SS.123456Z
+# DD-MM-YYYY HH:MM:SS+00:00
+# DD-MM-YYYY HH:MM:SS+00:00Z
+# DD-MM-YYYY HH:MM:SS + 00:00
+# DD-MM-YYYY HH:MM:SS + 00:00Z
+# DD-MM-YYYY HH:MM:SS
+# DD-MM-YYYY HH:MM:SSZ
+# DD-MM-YYYY HH:MM
+# DD-MM-YYYY HH:MMZ
+
+# With much ado,this is a format-agnostic expression to detect a date pattern:
+date_regex <- regex("\\d+(\\b.+?\\b\\d+){0,2}([T[:punct:]\\s](\\d+(\\b.+?\\b)?){2,3}([[:punct:]\\s]{0,5}((?:(\\d+(\\b.+?\\b)?){2}|\\d+))){0,1}){0,1}[Zz]?",ignore_case = TRUE,comments = TRUE)
+# Once detected as a "date," begin chunking:
+date_chop <- regex("\\d+(?=\\b.\\b|[Tt[:punct:]\\s]|([[:punct:]\\s]{0,5}((?:(\\d+(\\b.+?\\b)?){2}|\\d+)))|[Zz]?)")
+date_sep <- regex("((?<=\\d{1,8})\\b.\\b(?=\\d{1,8})|(?<=\\d{1,12})[Tt])(?=\\d{1,12})")
+
+# 10.1.3: dateymd and datemdy expressions---------------------------------------
+# From the matches made with date_regex above, we can now begin the process of
+# constructing expressions that validate dates (based on its pattern match).
+# 
+# 
+# eparate a match into 
+# two likely date formats and set these up to only accept a more limited format 
+# (e.g., 1x separator) covering both the Y-M-D and M-D-Y formats:
+# Y-M-D Format:
+dateymd <- regex("\\d+(\\b.\\b\\d{2}){0,2}([T[:punct:]\\s](\\d{2}(\\b.\\b)?){2,3}([[:punct:]\\s]{0,5}((?:(\\d+(\\b.+?\\b)?){2}|\\d+))){0,1}){0,1}[Zz]?", comments = TRUE)
+# M-D-Y Format:
+datemdy <- regex("\\d{2}(\\b.\\b\\d{2}){0,1}(\\b.\\b\\d+){1}([T[:punct:]\\s](\\d{2}(\\b.\\b)?){2,3}([[:punct:]\\s]{0,5}((?:(\\d+(\\b.+?\\b)?){2}|\\d+))){0,1}){0,1}[Zz]?", comments = TRUE)
+
+# 10.1.4: Expressions to validate a date based on its format--------------------
+# Baseline separator is expecting "1x something" in between these patterns
+monthdayv <- "((0?1|0?3|0?5|0?7|0?8|10|12|Jan|January|Mar|March|May|Jul|July|Aug|August|Oct|October|Dec|December)\\b.\\b(0?[1-9]|1[0-9]|2[0-9]|3[0-1])|(0?4|0?6|0?9|11|Apr|April|Jun|June|Sep|September|Nov|November)\\b.\\b(0?[1-9]|1[0-9]|2[0-9]|30)|(0?2|Feb|February)\\b.\\b(0?[1-9]|1[0-9]|2[0-9]))"
+daymonthv <- "((0?[1-9]|1[0-9]|2[0-9]|3[0-1])\\b.\\b(0?1|0?3|0?5|0?7|0?8|10|12|Jan|January|Mar|March|May|Jul|July|Aug|August|Oct|October|Dec|December)|(0?[1-9]|1[0-9]|2[0-9]|30)\\b.\\b(0?4|0?6|0?9|11|Apr|April|Jun|June|Sep|September|Nov|November)|(0?[1-9]|1[0-9]|2[0-9])\\b.\\b(0?2|Feb|February))"
+ts_valid <- "[Tt](0?[0-9]|1[0-9]|2[0-3])\\b.\\b([0-5][0-9])(\\b.\\b([0-5][0-9])(\\b.\\b((0?[0-9]|1[0-9]|2[0-3])\\b.\\b([0-5][0-9])|\\d+))?)?[Zz]?\\b"
+
+# Just months and days
+monthsv <- "(0?1|0?2|0?3|0?4|0?5|0?6|0?7|0?8|0?9|10|11|12|Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|September|Oct|October|Nov|November|Dec|December)"
+daysv <- "(0?[1-9]|1[0-9]|2[0-9]|3[0-1])"
+
+# No seperator versions of the month-day, day-month, and time stamp arrangements:
+ns_monthdayv <- "((0?1|0?3|0?5|0?7|0?8|10|12|Jan|January|Mar|March|May|Jul|July|Aug|August|Oct|October|Dec|December)(0?[1-9]|1[0-9]|2[0-9]|3[0-1])|(0?4|0?6|0?9|11|Apr|April|Jun|June|Sep|September|Nov|November)(0?[1-9]|1[0-9]|2[0-9]|30)|(0?2|Feb|February)(0?[1-9]|1[0-9]|2[0-9]))"
+ns_daymonthv <- "((0?[1-9]|1[0-9]|2[0-9]|3[0-1])(0?1|0?3|0?5|0?7|0?8|10|12|Jan|January|Mar|March|May|Jul|July|Aug|August|Oct|October|Dec|December)|(0?[1-9]|1[0-9]|2[0-9]|30)(0?4|0?6|0?9|11|Apr|April|Jun|June|Sep|September|Nov|November)|(0?[1-9]|1[0-9]|2[0-9])(0?2|Feb|February))"
+ns_ts_valid <- "[Tt](0?[0-9]|1[0-9]|2[0-3])(\\b.\\b)?([0-5][0-9])((\\b.\\b)?([0-5][0-9])((\\b.\\b)?((0?[0-9]|1[0-9]|2[0-3])(\\b.\\b)?([0-5][0-9])|\\d+))?)?[Zz]?\\b"
+
+
+# mdytv <- paste0(monthdayv,"|",ns_monthdayv,"\\b.\\b0?\\d+|(20(?:[0-1][0-9]|2(?:[0-5])))|(1[0-9][0-9][0-9])","(?:",ts_valid,"|",ns_ts_valid,")")
+mdytv <- paste0(monthdayv,"\\b.\\b0?\\d+",ts_valid )
+mdyv <- paste0(monthdayv,"\\b.\\b0?\\d+\\b")
+myv <- paste0(monthsv,"\\b.\\b0?\\d+\\b")
+datev_mdyt <- regex(paste0("^(?:(",mdytv,")|(",mdyv,")|(",myv,"))$"),ignore_case = TRUE, comments = TRUE)
+
+dmytv <- paste0(daymonthv,"\\b.\\b0?\\d+(?:",ts_valid,"|",ns_ts_valid,")")
+dmyv <- paste0(daymonthv,"\\b.\\b0?\\d+\\b")
+datev_dmyt <- regex(paste0("^(?:(",dmytv,")|(",dmyv,"))$"),ignore_case = TRUE, comments = TRUE)
+
+ymdtv <- paste0("0?\\d+\\b.\\b",monthdayv,ts_valid)
+ymdv <- paste0("0?\\d+\\b.\\b",monthdayv,"\\b")
+ymv <- paste0 ("0?\\d+\\b.\\b",monthsv,"\\b")
+ym_nosep_v <- paste0("^\\b(20(?:[0-1][0-9]|2(?:[0-5])))|(1[0-9][0-9][0-9])(?=",monthsv,")")
+# TODO: see if can develop regex to detect and then break apart "likely"
+# no separator dates.
+# Ex: 201806 = likely, 2018-06. Such an approach should likely be limited to
+# detecting 4-year patterns (YYYY) paired with months (0-12). Optional for 
+# days (as they range between 1 and 31).
+yv <- paste0("\\b0?\\d+\\b")
+datev_ymdt <- regex(paste0("^(?=[-]?)(?:(",ymdtv,")|(",ymdv,")|(",ymv,")|(",yv,"))$"),ignore_case = TRUE, comments = TRUE)
+
+datev <- regex(paste0("^(?=[-]?)(?:(", mdytv,")|(",mdyv,")|(",myv,")|(",dmytv,")|(",dmyv,")|(",ymdtv,")|(",ymdv,")|(",ymv,")|(",yv,"))$"),ignore_case = TRUE, comments = TRUE)
+
+datevtext <- paste0("(?:(", mdytv,")|(",mdyv,")|(",myv,")|(",dmytv,")|(",dmyv,")|(",ymdtv,")|(",ymdv,")|(",ymv,")|([-]?",yv,"(?:\\b\\s{1,2}\\b[[:punct:]\\w]{0,6})?))")
+
+
+# Generalized year, month, and day extractors, per expected format:
+ymd_yextr <- regex(paste0("(?<=^[-]?)\\b0?\\d+(?=\\b(.\\b",monthdayv,ts_valid,")|(.\\b",monthdayv,")|((.\\b)?",monthsv,")|(",yv,")|$)"))
+mdy_yextr <- regex(paste0("(?<=^\\b(?:",monthdayv,"|",monthsv,")(\\b.)?)\\d+(?=",ts_valid,"|\\b$)"))
+dmy_yextr <- regex(paste0("(?<=^\\b",daymonthv,"(\\b.)?)\\d+(?=",ts_valid,"|\\b$)"))
+
+ymd_mextr <- regex(paste0("(?<=^[-]?\\b\\d{1,9}(\\b.\\b)?)", monthsv,"(?=$|(\\b.\\b)?",daysv,"(",ts_valid,"|$)",")"))
+mdy_mextr <- regex(paste0("(?<=^\\b)", monthsv,"(?=(\\b.\\b)?(",daysv,")?(\\b.\\b)?\\d{1,9}(?:",ts_valid,"|$)",")"))
+dmy_mextr <- regex(paste0("(?<=^\\b", daysv,"(\\b.\\b)?)",monthsv,"(?=(\\b.\\b)?\\d{1,9}(?:",ts_valid,"|$)",")"))
+
+ymd_dextr <- regex(paste0("(?<=^[-]?\\b\\d{1,9}(\\b.\\b)?", monthsv,"(\\b.\\b)?)",daysv,"(?=",ts_valid,"|$)"))
+mdy_dextr <- regex(paste0("(?<=^\\b", monthsv,"(\\b.\\b)?)", daysv,"(?=(\\b.\\b)?\\d{1,9}(?:",ts_valid,"|$)",")"))
+dmy_dextr <- regex(paste0("(?<=^\\b)", daysv,"(?=(\\b.\\b)?",monthsv,"(\\b.\\b)?\\d{1,9}(?:",ts_valid,"|$)",")"))
+
+
+# A publication date extractor:
+pubdate_extr <- regex(paste0("(?<=publication[[:punct:][:space:][:blank:]]{1,7}value[[:punct:][:space:][:blank:]]{1,7})", datevtext), ignore_case = TRUE, comments = TRUE)
+# A creation date extractor:
+createdate_extr <- regex(paste0("(?<=creation[[:punct:][:space:][:blank:]]{1,7}value[[:punct:][:space:][:blank:]]{1,7})", datevtext), ignore_case = TRUE, comments = TRUE)
+# A lastUpdate date extractor:
+lastupdate_extr <- regex(paste0("(?<=lastUpdate[[:punct:][:space:][:blank:]]{1,7}value[[:punct:][:space:][:blank:]]{1,7})", datevtext), ignore_case = TRUE, comments = TRUE)
+# A revision date extractor:
+revisiondate_extr <- regex(paste0("(?<=revision[[:punct:][:space:][:blank:]]{1,7}value[[:punct:][:space:][:blank:]]{1,7})", datevtext), ignore_case = TRUE, comments = TRUE)
+
+# 10.2: Data and field QC REGEX-------------------------------------------------
+# Create a generalized NGDA### test using varying text formats that may host
+# an NGDAID:
+genngdaidtag <- paste0(
+  "(?:", "(?<=NGDAID)\\d+", "|",
+  "(?<=[Nn][Oo][:punct:]?[[:space:][:blank:]]?)\\d+",
+  "|", "(?<=[Nn]umber[[:punct:][:space:][:blank:]]?)\\d+",
+  ")")
+# Create a generalized REGEX to search for NGDAID### (which will not match
+# NGDAID numbers in the FGDC list); this looks for patterns of numbers within
+# strings per the above genngdaidtag
+ngdaid_gen <- regex(genngdaidtag, ignore_case = TRUE, comments = TRUE)
+temporalnote <- regex("(?:indeterminatePosition|unknown|after|before|now)*?\\b(?=\\d{4})", comments = TRUE)
+temporalendallowed <- regex("(?:unknown|after|before|now)", ignore_case = TRUE, comments = TRUE)
+progresscodeallowedFGDC <- regex("(?:^completed$|^historicalArchive$|^obsolete$|
+                                 ^onGoing$|^planned$|^required$|^underDevelopment$|^final$
+                                 |^pending$|^retired$|^superseded$|^tentative$|^valid$|
+                                 ^accepted$|^notAccepted$|^withdrawn$|^proposed$|
+                                 ^deprecated$)", ignore_case = TRUE, 
+                                 comments = TRUE)
+frequpdateallowedFGDC <- regex("(?:continual|daily|weekly|fortnightly|monthly|
+                               quarterly|biannually|annually|asNeeded|irregular|
+                               notPlanned|unknown|periodic|semimonthly|
+                               biennially)",
+                               ignore_case = TRUE,
+                               comments = TRUE)
+resppartyrolecodes <- regex("(?:author|custodian|distributor|originator|owner|
+                        pointOfContact|principalInvestigator|processor|publisher
+                        |resourceProvider|sponsor|user|coAuthor|collaborator|
+                        contributor|editor|funder|mediator|rightsHolder|
+                        stakeholder)", ignore_case = TRUE, comments = TRUE)
+
+# Latitude and Longitude finders
+bbelong <- regex("bbox-east-long", ignore_case = TRUE)
+bbnlat <- regex("bbox-north-lat", ignore_case = TRUE)
+bbslat <- regex("bbox-south-lat", ignore_case = TRUE)
+bbwlong <- regex("bbox-west-long", ignore_case = TRUE)
+
+
+blankify <- paste0("")
+blanknullna_tester <- regex("(?:^$|^NULL$|^NA$)", ignore_case = TRUE)
+blanktester <- regex("^$")
+nulltester <- regex("NULL", ignore_case = FALSE)
+successtester <- regex("Success", ignore_case = TRUE)
+failtester <- regex("Fail", ignore_case = TRUE)
+natester <- regex("NA", ignore_case = TRUE)
+anythingtester <- regex(".", dotall = TRUE)
+anypunct <- regex("[:punct:]", ignore_case = TRUE, comments = TRUE)
+anypunct_ndoc <- regex("\\w[:punct:]\\w(?![:punct:]?\\s?department\\s?of\\s?commerce)", ignore_case = TRUE, comments = TRUE)
+ngdatago <- regex("ngda", ignore_case = TRUE)
+ngdatagc <- regex("^ngda$", ignore_case = TRUE)
+ngdaltago <- regex("National Geospatial Data Asset", ignore_case = TRUE)
+ngdaltagc <- regex("^National Geospatial Data Asset$", ignore_case = TRUE)
+ngdaidtagc <- regex("^ngdaid\\d+", ignore_case = TRUE)
+nonngdatags <- regex("^(?:ngda|National[[:space:][:blank:]]?Geospatial[[:space:][:blank:]]?Data[[:space:][:blank:]]?Asset|
+                     ngdaid\\d+)$", ignore_case = TRUE, comments = TRUE)
+ngdaidtagc <- regex("^ngdaid\\d+", ignore_case = TRUE)
+wordcounter <- regex("\\b\\w+\\b")
+wdelimpunct <- regex("\\b\\w+\\b[:punct:]*?", ignore_case = TRUE, comments = TRUE)
+role_extr <- regex("(?<=roles\\b[[:punct:][:space:][:blank:]]{1,10}(\\b\\w{1,50}\\b[[:punct:][:space:][:blank:]]{1,10}){0,10})\\b\\w+\\b",
+                   ignore_case = TRUE, comments = TRUE
+)
+
+# Latitude and Longitude Minimums and Maximums
+bbelong <- regex("bbox-east-long", ignore_case = TRUE)
+bbnlat <- regex("bbox-north-lat", ignore_case = TRUE)
+bbslat <- regex("bbox-south-lat", ignore_case = TRUE)
+bbwlong <- regex("bbox-west-long", ignore_case = TRUE)
+
+lat_min <- as.double(-90)
+lat_max <- as.double(90)
+long_min <- as.double(-180)
+long_max <- as.double(180)
+
+# Download and WMS REGEX
+scanzip <- regex(".\\.zip$", ignore_case = TRUE, comments = TRUE)
+scanwms <- regex("WMS", ignore_case = FALSE, comments = TRUE)
+scanerest <- regex("Esri REST", ignore_case = TRUE, comments = TRUE)
+rlf_dwnld <- regex("download", ignore_case = TRUE, comments = TRUE)
+downloadd <- regex("download(?:able|ed|)[[:space:][:blank:][:punct:]](?:data|file[s])",
+                   ignore_case = TRUE, comments = TRUE
+)
+ddownload <- regex("(?:data|file[s])[[:space:][:blank:][:punct:]]
+                   [dD]ownload(?:able|ed|ing)", ignore_case = TRUE, comments = TRUE)
+todownload <- regex("(^view[er]?)*?to[[:space:][:blank:][:punct:]](view\\sand)*?
+                   [dD]ownload.+(?:data|file[s])", ignore_case = TRUE, comments = TRUE)
+zip_regex <- regex("ZIP", ignore_case = TRUE, comments = TRUE)
+wmswords <- regex("(?:\\b[Ww][Mm][Ss]\\b
+                  |
+                  web\\b.+\\bmap[[ping][Ss]]?\\b.+\\bservice[s]?
+                  |
+                  web\\b.+\\bmap[[ping][s]]?
+                  |
+                  map[[ping][s]]*?\\b.+\\bservice[s]?
+                  |
+                  interactive\\b.+\\bmap[[ping][s]]?)",
+                  ignore_case = TRUE, comments = TRUE
+)
+wmsregex <- regex("WMS", ignore_case = TRUE, comments = TRUE)
+
+# A REGEX to test if a NOAA MD Identifier links back to Fisheries
+# Purpose: Link re-constitution of Original MD Location on Fisheries' Site
+fisheriestester <- regex("[\\.]nmfs\\.inport.")
+fisheriesscan <- regex("fisheries\\.noaa\\.gov/inport/item/", ignore_case = TRUE, comments = TRUE)
+nceiscan1 <- regex("ncei\\.noaa\\.gov/access/metadata/", ignore_case = TRUE, comments = TRUE)
+nceiscan2 <- regex("ncei\\.noaa\\.gov/metadata/geoportal/rest/", ignore_case = TRUE, comments = TRUE)
+datanoaascan <- regex("data\\.noaa\\.gov", ignore_case = TRUE, comments = TRUE)
+# A generalized HTML REGEX:
+isurl_regex <- regex("http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]
+                     |(?:%[0-9a-fA-F][0-9a-fA-F]))+", comments = TRUE)
+
+# A HTML REGEX tailored to scan for the Census MD URL
+censusmdurl <- regex("http[s]?://meta\\.geo\\.census\\.gov(?:[a-zA-Z]|[0-9]|
+                     [$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+\\.xml",
+                     comments = TRUE
+)
+# A HTML REGEX tailored to scan for the Census Data Download URL
+censusdwnldurl <- regex("http[s]?://www2\\.census\\.gov(?:[a-zA-Z]|[0-9]|
+                        [$-_@.&+]|[!*\\(\\),]|
+                        (?:%[0-9a-fA-F][0-9a-fA-F]))+\\.zip",
+                        comments = TRUE
+)
+# HTML REGEX source:
+# https://stackoverflow.com/questions/
+# 26496538/extract-urls-with-regex-into-a-new-data-frame-column
+#
+# This is a Hadleyverse solution, modified by Andrew Beggs to always check for
+# "*meta.geo.census.gov*" and "*www2.census.gov*" as part of the HTML string.
+# This modification is to ensure de-conflict among the various html links
+# contained in the API's resource data payload.
+
+# Census Citation Identifier REGEX
+censuscitid <- regex("\\w+[^\\.]")
+# NOAA Metadata Identifier REGEX
+noaamdidfr <- regex("[^\\:|\\.](?:[\\d]|[a-zA-Z0-9_-])+$")
+# NOAA Citation Identifier REGEX
+ncitid <- regex("^(?:\\w)_+$")
+
+# 11: Define Date Validation Function-------------------------------------------
+# Initialize some parameters before we ever use the function
+dimlimits <- vector(mode = "integer", length = 2)
+dimlimits[1] <- as.integer(1)
+dimlimits[2] <- as.integer(5)
+n <- as.integer(0)
+yrval <- as.integer(0)
+mthval <- as.integer(0)
+dayval <- as.integer(0)
+
+# 4,6,9,11 = 30 days
+# 1,3,5,7,8,10,12 = 31 days
+# 2 = 28 days except in leap years
+month30days <- as.integer(c("4", "6", "9", "11"))
+month31days <- as.integer(c("1", "3", "5", "7", "8", "10", "12"))
+month28days <- as.integer(2)
+# POSIX tryFormats vector:
+posixformatss <- c("%Y-%m-%dT%H:%M%:%OS6", "%Y-%m-%d %H:%M%:%OS6",
+                   "%Y-%m-%dT%H:%M%:%S", "%Y-%m-%d %H:%M%:%S",
+                   "%Y-%m-%d","%m-%d-%Y","%m/%d/%Y","%Y/%m/%dT%H:%M%:%OS6",
+                   "%Y/%m/%d %H:%M%:%OS6", "%Y/%m/%dT%H:%M%:%S",
+                   "%Y/%m/%d %H:%M%:%S", "%Y/%m/%d")
+# A list of outputs generated by datevalidation that we do not want to try
+# coerce into a POSIX format:
+disallowedformats <- regex("(?:(ymd|mdy|ymdtime|mdytime|ymdtimeplus|mydtimeplus)(?=-InvalidDateDigits|
+-InvalidDaywFebnonLY-InvalidDateDigits|-InvalidDaywLY-InvalidDateDigits|
+-FutureYearDate|-SameYearFutureMonth|-SameYearMonthFutureDay)|WordinField|UnknownFormat|
+                           Blank|NegativeDate)",ignore_case = TRUE,
+                           comments = TRUE)
+ymdscorer <- c("y","ym","ymd","ymdtime","ymdtimeplus")
+mdyscorer <- c("my","mdy","mdytime","mdytimeplus")
+dmyscorer <- c("dmy","dmytime","dmytimeplus")
+
+# MDYT, MDY, MY, DMYT, DMY, YMDT, YMD, YM, Y
+date_scorer <- as.integer(c(5,3,2,5,3,6,3,2,1))
+date_format <- as.character(c("mdytime", "mdy", "my", "dmytime", "dmy", "ymdtime", "ymd", "ym", "y"))
+
+# Current time:
+ct <- as.POSIXct(Sys.time())
+# Break the current date apart for future date checks:
+ctr <- str_replace_all(ct,"\\s","-")
+ctr <- str_replace(ctr,"(?<=^\\d{4}\\-\\d{2}\\-\\d{2})\\-(?=\\d{2}:\\d{2}:\\d{2})","T")
+ctyr <- as.integer(str_extract(ctr,ymd_yextr))
+ctmth <- as.integer(str_extract(ctr,ymd_mextr))
+ctdy <- as.integer(str_extract(ctr,ymd_dextr))
+
+# Note: this script uses lubridate's leap_year function to check if the date
+# being tested is in a leap year or not and then passes/fails a 02-29 date
+#
+# //Begin datevalidation function\\
+datevalidation <- function(y) {
+  q <- as.integer(length(y))
+  n <- as.integer(0)
+  dimlimits[1] <- as.integer(q)
+  dimlimits[2] <- as.integer(9)
+  d8format <- vector(mode = "logical", length = dimlimits[2])
+  validflag <- vector(mode = "logical", length = dimlimits[2])
+  d8lngthl <- vector(mode = "logical", length = dimlimits[1])
+  d8lngthc <- vector(mode = "character", length = dimlimits[1])
+  d8lngthi <- vector(mode = "integer", length = dimlimits[1])
+  d8formvald <- tibble(
+    "d8format" = d8lngthc, "d8valid" = d8lngthl,
+    "futuredate" = d8lngthl, "d8score" = d8lngthi
+  )
+  
+  bt <- FALSE
+  wt <- FALSE
+  nd <- FALSE
+  skipflag <- FALSE
+  
+  
+  for (n in 1:q) {
+    y[n] <- str_trim(str_replace_all(y[n], "\\n$",""))
+    dl <- str_length(y[n])
+    bt <- str_detect(y[n],blanknullna_tester)
+    wt <- str_detect(y[n],"[NnAa]{3}|\\w+[^[:punct:]\\+\\d\\sTtZz]+")
+    dt <- str_detect(y[n],date_regex)
+    if (!bt || dl <= 0 ){
+      if (!wt && dt){
+        # not blank but is date negative?
+        nd <- if(if(is.na(str_locate(y[n],anypunct)[1])){0} else {str_locate(y[n],anypunct)[1]} == 1){TRUE} else {FALSE}
+        
+        if (nd){
+          # Yes, date is negative, route out
+          d8formvald$d8format[n] <- paste0("NegativeDate")
+          d8formvald$d8valid[n] <- TRUE
+          d8formvald$futuredate[n] <- FALSE
+          d8formvald$d8score[n] <- 1
+        } else {
+          # Date is not blank or negative
+          # String cleanup to ensure good REGEX matching:
+          y[n] <- str_replace_na(str_replace_all(str_replace_all(str_replace_all(y[n],"\\s+","-"),"[:punct:]{2,}","-"),"[:punct:][Tt][:punct:]","T"),"NA")
+          y[n] <- str_extract(y[n],date_regex)
+          d8formvald$d8format[n] <- paste0(if(str_detect(y[n],ymdtimeplus_regex)){"ymdtimeplus"} else {if(str_detect(y[n], mdytimeplus_regex)){"mdytimeplus"} else {if(str_detect(y[n],ymdtime_regex)){"ymdtime"} else {if(str_detect(y[n], mdytime_regex)){"mdytime"} else {if(str_detect(y[n],ymd_regex)){"ymd"} else {if(str_detect(y[n], mdy_regex)){"mdy"} else {if(str_detect(y[n],ym_regex)){"ym"} else {if(str_detect(y[n], my_regex)){"my"} else {if(str_detect(y[n],jy_regex)){"y"}}}}}}}}})
+          d8score <- min(as.integer(if(is_empty(str_which(ymdscorer,d8formvald$d8format[n]))) {str_which(mdyscorer,d8formvald$d8format[n])} else {str_which(ymdscorer,d8formvald$d8format[n])}))
+          yr <- if(is.na(str_extract(y[n],ymd_yextr))){if(is.na(str_extract(y[n],mdy_yextr))){0} else {as.integer(str_extract(y[n],mdy_yextr))}} else {as.integer(str_extract(y[n],ymd_yextr))}
+          yrl <- str_length(yr)
+          # yrl <- if(is.na(str_length(str_extract(y[n],ymd_yextr)))){if(is.na(str_length(str_extract(y[n],mdy_yextr)))){0} else {str_length(str_extract(y[n],mdy_yextr))}} else {str_length(str_extract(y[n],ymd_yextr))}
+          mth <- if(is.na(str_extract(y[n],ymd_mextr))){if(is.na(str_extract(y[n],mdy_mextr))){0} else {as.integer(str_extract(y[n],mdy_mextr))}} else {as.integer(str_extract(y[n],ymd_mextr))}
+          dy <- if(is.na(str_extract(y[n],ymd_dextr))){if(is.na(str_extract(y[n],mdy_dextr))){0} else {as.integer(str_extract(y[n],mdy_dextr))}} else {as.integer(str_extract(y[n],ymd_dextr))}
+          dt <- str_detect(y[n],date_regex)
+          dtv <- str_detect(y[n],dateyv)
+          leapflag <- leap_year(yr)
+          idywlyflag <- FALSE
+          idywmthflag <- FALSE
+          # These are deprecated with the use of dateyv:
+          # month31match <- if(match(mth, month31days, nomatch = 0) == 0){FALSE} else {TRUE}
+          # month30match <- if(match(mth, month30days, nomatch = 0) == 0){FALSE} else {TRUE}
+          if (leapflag && mth == 2 && dy > 29){
+            # Incorrectly assigned day during leap year
+            idywlyflag <- TRUE
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"InvalidDaywLY"), sep = "-")
+            d8formvald$d8valid[n] <- dtv
+            d8formvald$futuredate[n] <- FALSE
+            d8formvald$d8score[n] <- d8score - 1
+          } else if (leapflag && mth == 2 && dy <=29){
+            # Correctly assigned day during leap year
+            idywlyflag <- FALSE
+            if (dy==29){
+              d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"LY"), sep = "-")
+            }
+          } else if (mth == 2 && dy > 28) {
+            # Incorrectly assigned day larger than 28 to February in non-leap yr
+            idywmthflag <- TRUE
+            # Date formatted like date, is valid date, but we have incorrect day
+            # assignment in February when not a leap year
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"InvalidDaywFebnonLY"), sep = "-")
+            d8formvald$d8valid[n] <- dtv
+            d8formvald$futuredate[n] <- FALSE
+            d8formvald$d8score[n] <- d8score - 1
+          } else if (mth == 2 && dy <= 28){
+            # Correct day assignment for February in non-leap year
+            idywmthflag <- FALSE
+          } else {
+            # do nothing
+            idywlyflag <- FALSE
+            idywmthflag <- FALSE
+          }
+          if (yrl > 4){
+            # Because there are more than 4 digits and year is not negative, this 
+            # is the case where we have a future year date, e.g.: YYYYY
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"FutureYearDate"), sep = "-")
+            d8formvald$d8valid[n] <- FALSE
+            d8formvald$futuredate[n] <- TRUE
+            d8formvald$d8score[n] <- 0
+          } else if (yr > ctyr) {
+            # Future year date
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"FutureYearDate"), sep = "-")
+            d8formvald$d8valid[n] <- FALSE
+            d8formvald$futuredate[n] <- TRUE
+            d8formvald$d8score[n] <- 0
+          } else if (yr == ctyr){
+            # Same year date
+            if (mth > ctmth){
+              # Same year but future month:
+              d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"SameYearFutureMonth"), sep = "-")
+              d8formvald$d8valid[n] <- FALSE
+              d8formvald$futuredate[n] <- TRUE
+              d8formvald$d8score[n] <- 0
+            } else if (mth == ctmth){
+              if (dy > ctdy){
+                # same year and month but future day:
+                d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"SameYearMonthFutureDay"), sep = "-")
+                d8formvald$d8valid[n] <- FALSE
+                d8formvald$futuredate[n] <- TRUE
+                d8formvald$d8score[n] <- 0
+              }
+            }
+          } else if (yr < ctyr) {
+            # A year between 1000 and last year (e.g., 2023 as this is year 2024)
+            
+          } else if (yrl < 4){
+            # Before year 1000 date
+            
+          } else {
+            # Should be no other conditions 
+          }
+          
+          if (dt && !dtv){
+            # Date formatted like date, not valid date
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"InvalidDateDigits"), sep = "-")
+            d8formvald$d8valid[n] <- dtv
+            d8formvald$futuredate[n] <- FALSE
+            d8formvald$d8score[n] <- d8score - 1
+          } else if (dt && dtv) {
+            # Date formatted like date, is valid date, no leap year or Feb date
+            d8formvald$d8valid[n] <- dtv
+            d8formvald$futuredate[n] <- FALSE
+            d8formvald$d8score[n] <- d8score
+          } else if (!dt){
+            # Date not formatted like date
+            # Corollary is that dtv is also FALSE so no need to test it here
+            d8formvald$d8format[n] <- glue_collapse(c(d8formvald$d8format[n],"UnknownFormat"), sep = "-")
+            d8formvald$futuredate[n] <- FALSE
+            d8formvald$d8score[n] <- d8score
+          } else {
+            # should be no other conditions
+          }
+        }
+      } else if (wt){
+        # Word in date field, set values:
+        d8formvald$d8format[n] <- paste0("WordinField")
+        d8formvald$d8valid[n] <- FALSE
+        d8formvald$futuredate[n] <- FALSE
+        d8formvald$d8score[n] <- 0
+      }
+    } else if (bt) {
+      # Blank field, set values:
+      d8formvald$d8format[n] <- paste0("Blank")
+      d8formvald$d8valid[n] <- FALSE
+      d8formvald$futuredate[n] <- FALSE
+      d8formvald$d8score[n] <- 0
+    }
+  }
+  returnValue(d8formvald)
+}
+# //End datevalidation function\\
+
+# 12: Define Efficient Vector Compare Function----------------------------------
+# Source: https://stackoverflow.com/questions/
+# 52941157/r-efficient-way-to-test-whether-a-pair-of-vectors-is-disjoint
+# Some pointers taken from this source but function modified by Andrew Beggs
+#
+# This function intends to take in 2 "vector" arguments in string/char form
+# and test if they share any elements. It outputs a TRUE/FALSE binary
+# when it detects a match between any element of y and z.
+#
+# The function attempts to place the shortest vector first by comparing lengths
+# and uses the paste0 function to convert arrays to char. This function mostly
+# expects string-lists / character vectors anyway but the conversion helps
+# ensure that accidentally passing something unintended does not break this
+# shared element search (too much; I'm sure this is not perfect).
+t4sharedelems <- function(y, z) {
+  # Get lengths of incoming vectors/arrays:
+  ylength <- length(y)
+  zlength <- length(z)
+  # Sanitize inputs to char array
+  y <- paste0(y)
+  z <- paste0(z)
+  # Re-order the match search based on vector/array length so the searching is
+  # more efficient. Generally, match seems more efficient if the first vector
+  # is shorter so test for lengths and then place them according to length:
+  if (ylength > zlength) {
+    # Z is shorter so it goes first
+    tresults <- !all(is.na(match(z, y)))
+  } else if (zlength > ylength) {
+    # Z is longer so it goes second
+    tresults <- !all(is.na(match(y, z)))
+  } else if (ylength == zlength) {
+    # They're the same length (unusual but possible), put y first
+    tresults <- !all(is.na(match(y, z)))
+  } else {
+    # Error?
+    # But we still want to run the calculation so try the match function anyway:
+    tresults <- !all(is.na(match(y, z)))
+  }
+  returnValue(tresults)
+}
+
+
+# Begin: API calls; scanning from 1 to datapull_lim-----------------------------
+# This code block sets the overall for loop that iterates through each data set
+# present on Data.gov (from 1 to datapull_lim)
+# It includes a number of API Polling, Scraping, QC, and
+# File Downloading methods, checks, and loops.
+
+# Initialize counters to 0
+# overall counting index
+x <- 0
+j <- 0
+# overall batch counting index
+u <- 0
+k <- 0
+dpubdexist <- FALSE
+dlupdatedexist1 <- FALSE
+dlupdatedexist2 <- FALSE
+dcreatedexist <- FALSE
+te_extentst <- FALSE
+te_extentft <- FALSE
+
+starttime <- proc.time()
+print(starttime)
+print(paste0("Preparing to scan in ",datapull_lim," datasets from Data.gov..."))
+
+for (b in 14:l_abl) {
+  agencyn <- paste0("organization:",batches$agency[b])
+  nbatches <- batches$num_api_calls[b]
+  nrecords <- batches$geospatial[b]
+  
+  if (nbatches > 1) {
+    rowoffset <- vector(mode = "integer", length = nbatches)
+    rowoffset[[1]] <- as.integer(0)
+    rowlimiter <- vector(mode = "integer", length = nbatches)
+    rowlimiter[[1]] <- as.integer(1000)
+    for (i in 2:nbatches) {
+      rowoffset[[i]] <- as.integer((rowlimit * (i - 1)))
+      rowlimiter[[i]] <- as.integer(rowlimit)
+      if (i == nbatches) {
+        # On our last batch, how many records remain?
+        # Ex: for 1250 records (num_batches = 2):
+        # rowlimiter[1] = 1000 & rowlimiter[2] = 250 b/c 1000 + 250 = 1250
+        # and rowlimiter[2] = 1250 - ((2-1)*1000) -> 1250 - 1000 -> 250
+        rowlimiter[[i]] <- as.integer(nrecords - ((nbatches - 1) * rowlimit))
+      }
+    }
+    
+  } else if (nbatches <= 1) {
+    rowoffset <- vector(mode = "integer", length = 1)
+    rowoffset[[1]] <- as.integer(0)
+    rowlimiter <- vector(mode = "integer", length = 1)
+    rowlimiter[[1]] <- as.integer(nrecords)
+    # xb <- vector(mode = "integer", length = rowlimiter[[1]])
+  } else {
+    # No other options but terminating the if-elseif-else logic train
+  }
+  
+  # save.image(paste0(str_extract(Sys.time(),ymdv),"_Prod_i",sprintf("00%d",fileindexer),".Rdata"))
+  gc()
+  
+  for (k in 1:nbatches) {
+    apipull <- tryCatch(
+      list_flatten(package_search(
+        q = agencyn, fq = qfilter[pull_filter],
+        as = "table", rows = rowlimiter[[k]], start = rowoffset[[k]]
+      )), error=function(e) e
+    )
+    apilim <- 0
+    while (inherits(apipull,"error")||apilim < 6){
+      Sys.sleep(3)
+      apipull <- tryCatch(
+        list_flatten(package_search(
+          q = agencyn, fq = qfilter[pull_filter],
+          as = "table", rows = rowlimiter[[k]], start = rowoffset[[k]]
+        )), error=function(e) e
+      )
+      apilim <- apilim + 1
+    }
+    u <- u + 1
+    etbatchf <- proc.time()
+    if (x > 0){
+      etbatch <- (etbatchf - etbatchs)[[3]]
+      elapsedtime <- (proc.time() - starttime)[[3]]
+      prgstatus <- paste0(x, " of ", datapull_lim, " datasets scanned|", b, "/",l_abl, " bureaus|", k,"/", nbatches, " batches|", u, "/", num_batches,"|Batch time:",print.difftime(etbatch),"|Elapsed time: ", print.difftime(elapsedtime))
+      print(prgstatus)
+    }
+    print(sprintf("Batch %d: Polling Data.gov API for %d datasets %d -> %d of %d",k, rowlimiter[[k]], rowoffset[[k]], rowoffset[[k]] + rowlimiter[[k]], datapull_lim))
+    # as.data.frame(lapply(officialngdalist, trimws))
+    api_res <- apipull$results
+    api_extras <- apipull$results$extras
+    apibatchlim <- as.integer(rowlimiter[[k]])
+    j <- 0
+    for (j in 1:apibatchlim) {
+      x <- x + 1
+      etbatchs <- proc.time()
+      resourcecount <- as.integer(api_res$num_resources[[j]])
+      if (resourcecount > 0) {
+        apiresources <- data.table::as.data.table(api_res$resources[[j]])
+      } else {
+        # Do nothing since we skip dependency on apiresources below
+        # by duplicating the "if resourcecount > 0 check
+      }
+      
+      tempextra <- api_extras[[j]]
+      bname <- str_trim(str_replace_all(api_res$organization$title[[j]],"\\n",""))
+      api_results$AgencyBureau[x] <- bname
+      api_qcresults$AgencyBureau[x] <- bname
+      if (is_empty(str_which(tempextra$key,"dataset-reference-date"))){
+        tempdates <- ""
+      } else {
+        tempdates <- tempextra$value[str_which(
+          tempextra$key,
+          "dataset-reference-date"
+        )]
+      }
+      tedate <- FALSE
+      # .........................Data-Gov-Webpage QC..........................
+      api_MDfiles$AgencyBureau[x] <- bname
+      dsname <- str_trim(str_replace_all(api_res$name[j],"\\n",""))
+      dgovwebpage <- paste0("https://catalog.data.gov/dataset/", dsname)
+      api_MDfiles$Webpage[x] <- dgovwebpage
+      api_qcresults$`Data-Gov-Webpage`[x] <- dgovwebpage
+      # ...............................NGDA QC................................
+      ngdacheck <- str_replace_na(
+        match(dgovwebpage, str_trim(officialngdalist$Data.gov.Link)),
+        "NA"
+      )
+      isngda <- !str_detect(ngdacheck, blanknullna_tester)
+      if (isngda) {
+        # Coerce ngdacheck from string back to integer:
+        ngdacheck <- as.integer(ngdacheck)
+        # Dataset is a NGDA data set; establish expected values for:
+        # (and as REGEX to ignore cases when comparing)
+        # NGDA theme
+        # NGDA ID #
+        # NGDA title
+        expngdatheme <- str_trim(officialngdalist$NGDA_Theme[ngdacheck])
+        ngdathememw <- str_count(expngdatheme, wordcounter)
+        ngdathemepunct <- str_count(expngdatheme, "-")
+        if (ngdathemepunct >= 1) {
+          expngdatheme <- str_squish((str_split(expngdatheme, anypunct,
+                                                simplify = TRUE
+          )))
+          for (p in 1:length(expngdatheme)) {
+            thw <- str_replace_all(expngdatheme[p], "\\s", paste0("\\\\\\s"))
+            if (p < length(expngdatheme)){
+              ngdathemew <- paste0(
+                "(?:", thw,
+                "([[ngda][:space:]]*?theme)*?", "|",
+                "([[ngda][:space:]]*?theme)*?", thw,
+                ")|", ngdathemew
+              )
+            } else if (p == length(expngdatheme)){
+              ngdathemew <- paste0(ngdathemew,
+                                   "(?:", thw,
+                                   "([[ngda][:space:]]*?theme)*?", "|",
+                                   "([[ngda][:space:]]*?theme)*?", thw,
+                                   ")")
+              tmpthw <- str_replace_all(str_replace_all(officialngdalist$NGDA_Theme[ngdacheck],anypunct," "),"\\s+",paste0("\\\\\\s"))
+              ngdathemew <- paste0("(?:", tmpthw,
+                                   "([[ngda][:space:]]*?theme)", "|",
+                                   "([[ngda][:space:]]*?theme)", tmpthw,
+                                   ")",ngdathemew)
+            }
+          }
+        } else if (ngdathememw >= 1) {
+          # Do nothing for now?
+          thw <- str_replace_all(expngdatheme, "\\s", paste0("\\\\\\s"))
+          ngdathemew <- paste0(
+            "(?:", thw,
+            "([[ngda][:space:]]*?theme)*?", "|",
+            "([[ngda][:space:]]*?theme)*?", thw, ")"
+          )
+        }
+        ngdatheme_exp <- regex(ngdathemew, ignore_case = TRUE, comments = TRUE)
+        # Obtain the NGDAID:
+        ngdaid <- as.integer(officialngdalist$NGDAID[ngdacheck])
+        # Create various, formatted text strings to search upon where we
+        # expect to match the NGDAID. varname+lz means "leading zero" variant
+        # of the number. There are "hundreds" of NGDA so we may find up to 2
+        # leading zeros (if numbers stored that way in API or if placed with
+        # leading zeros by the agencies/bureaus). Otherwise, this ensures a
+        # robust testing protocol.
+        ngdaidtaglz <- sprintf("NGDAID%003d", ngdaid)
+        ngdaidtag <- sprintf("NGDAID%d", ngdaid)
+        noabbrevtaglz <- sprintf(
+          "[Nn][Oo][:punct:]?[[:space:][:blank:]]?%003d", ngdaid
+        )
+        noabbrevtag <- sprintf(
+          "[Nn][Oo][:punct:]?[[:space:][:blank:]]?%d",
+          ngdaid
+        )
+        numberwtaglz <- sprintf(
+          "number[[:punct:][:space:][:blank:]]?%003d",
+          ngdaid
+        )
+        numberwtag <- sprintf("number[[:punct:][:space:][:blank:]]?%d", ngdaid)
+        numbertaglz <- sprintf("^%003d$", ngdaid)
+        numbertag <- sprintf("^%d$", ngdaid)
+        # Isolated versions of the prior texts:
+        ngdaidtaglzi <- sprintf("^NGDAID%003d$", ngdaid)
+        ngdaidtagi <- sprintf("^NGDAID%d$", ngdaid)
+        noabbrevtaglzi <- sprintf(
+          "^[Nn][Oo][:punct:]?[[:space:][:blank:]]?%003d$", ngdaid
+        )
+        noabbrevtagi <- sprintf(
+          "^[Nn][Oo][:punct:]?[[:space:][:blank:]]?%d$",
+          ngdaid
+        )
+        numberwtaglzi <- sprintf(
+          "^number[[:punct:][:space:][:blank:]]?%003d$",
+          ngdaid
+        )
+        numberwtagi <- sprintf(
+          "^number[[:punct:][:space:][:blank:]]?%d$",
+          ngdaid
+        )
+        
+        
+        # Combine the prior formatted text strings into a REGEX format:
+        ngdaidtags <- paste0(
+          "(?:", ngdaidtaglz, "|", ngdaidtag, "|",
+          noabbrevtaglz, "|", noabbrevtag, "|", numberwtaglz,
+          "|", numberwtag, "|", numbertaglz, "|", numbertag, ")"
+        )
+        ngdaidtagsisolated <- paste0(
+          "(?:", ngdaidtaglzi, "|", ngdaidtagi, "|",
+          noabbrevtaglzi, "|", noabbrevtagi, "|",
+          numberwtaglzi, "|", numberwtagi, "|",
+          numbertaglz, "|", numbertag, ")"
+        )
+        # Create a REGEX based on expected format(s) of NGDAID for use in
+        # testing keywords:
+        ngdaid_exp <- regex(ngdaidtags, ignore_case = TRUE, comments = TRUE)
+        # Create a bounded version of the prior REGEX:
+        ngdaid_expi <- regex(ngdaidtagsisolated,
+                             ignore_case = TRUE, comments = TRUE
+        )
+        # Create a REGEX for QC-checking the title (bonus points only)
+        ngdatitletmp <- str_replace_all(str_trim(officialngdalist$NGDA.Title[ngdacheck]),"[[:punct:][:space:][:blank:]]","_")
+        ngdatitle <- regex(ngdatitletmp,
+                           ignore_case = TRUE, comments = TRUE
+        )
+        # Add the expected NGDAID value to the results and qc matrices:
+        api_results$NGDAID[x] <- ngdaid
+        api_qcresults$NGDAID[x] <- ngdaid
+        api_MDfiles$NGDAID[x] <- ngdaid
+      } else {
+        # Data set is a non-NGDA, blank these vars so we can check against
+        # them later on in the script
+        ngdatheme_exp <- blankify
+        ngdaid_exp <- blankify
+        ngdaid_expi <- blankify
+        ngdatitle <- blankify
+        ngdaidtaglz <- blankify
+        ngdaidtag <- blankify
+      }
+      
+      # ............................Title QC..................................
+      ds_title <- paste0(api_res$title[j])
+      ds_title <- str_replace_all(ds_title,"\\n$",blankify)
+      ds_title <- str_trim(str_replace_all(ds_title,"\\b\\s+\\b"," "))
+      ds_title <- str_replace_na(ds_title, "NA")
+      api_results$Title[x] <- ds_title
+      api_MDfiles$DS_Title[x] <- ds_title
+      if (str_length(ds_title) == 0) {
+        # This condition should never trigger but it is here for thoroughness
+        api_qcresults$Title[x] <- ds_title
+        api_qcresults$`Title-Check`[x] <- FALSE
+        api_qcresults$`Title-Score`[x] <- 0
+      } else {
+        if (isngda) {
+          # NGDA data set, looking to see that the Title on Data.gov
+          # matches the title on FGDC
+          # This is for "bonus points" that all sources agree, no score
+          # penalty from non-NGDA for a mismatch with FGDC
+          api_qcresults$Title[x] <- ds_title
+          api_qcresults$`Title-Check`[x] <- TRUE
+          ds_titletmp <- str_replace_all(str_trim(ds_title),"[[:punct:][:space:][:blank:]]","_")
+          if (str_detect(ds_titletmp, ngdatitle)) {
+            # assign +1 bonus point for a non-case sensitive match between
+            # Data.gov to FGDC's website of approved NGDAs
+            api_qcresults$`Title-Score`[x] <- 2
+          } else {
+            # Regular credit
+            api_qcresults$`Title-Score`[x] <- 1
+          }
+        } else {
+          # Non-NGDA DS should always have a title when pulling from the API
+          api_qcresults$Title[x] <- ds_title
+          api_qcresults$`Title-Check`[x] <- TRUE
+          api_qcresults$`Title-Score`[x] <- 1
+        }
+      }
+      # .........................Abstract QC..................................
+      ds_abstract <- paste0(str_replace_all(str_remove_all(str_replace_all(
+        str_replace_all(str_trim(api_res$notes[j]), "\\n$",""),"\\b\\s+\\b"," ")
+        ,"<.*?>"),"\\.(?=\\w+)","\\. "))
+
+      api_results$Abstract[x] <- ds_abstract
+      
+      if (str_length(ds_abstract) == 0) {
+        # If blank, fail
+        api_qcresults$`Abstract-Check`[x] <- FALSE
+        api_qcresults$`Abstract-Score`[x] <- 0
+      } else if (str_detect(ds_abstract, anythingtester)) {
+        # If literally anything else, pass
+        api_qcresults$`Abstract-Check`[x] <- TRUE
+        api_qcresults$`Abstract-Score`[x] <- 1
+      } else {
+        # Should never trigger but logic catchall/overflow, fail
+        api_qcresults$`Abstract-Check`[x] <- FALSE
+        api_qcresults$`Abstract-Score`[x] <- 0
+      }
+      # ........................MD-PubDate QC.................................
+      MD_PubDate <- paste0(api_res$metadata_created[j])
+      MD_PubDate <- str_replace_na(MD_PubDate, "NA")
+      api_results$`Publication Date (Metadata)`[x] <- MD_PubDate
+      d8exists <- str_detect(MD_PubDate,date_regex)
+      if (d8exists){
+        d8 <- MD_PubDate
+        mdpubdateexists <- d8exists
+        # if it "looks like a date," test if valid:
+        d8valid <- str_detect(d8, datev)
+        # Then attempt to find the date's format:
+        d8len <- str_length(d8)
+        d8form <- c(str_length(str_extract(d8,mdytv)),
+                    str_length(str_extract(d8,mdyv)),
+                    str_length(str_extract(d8,myv)),
+                    str_length(str_extract(d8,dmytv)),
+                    str_length(str_extract(d8,dmyv)),
+                    str_length(str_extract(d8,ymdtv)),
+                    str_length(str_extract(d8,ymdv)),
+                    str_length(str_extract(d8,ymv)),
+                    str_length(str_extract(d8,yv)))
+        d8form <- d8len == d8form
+        d8index <- match(TRUE,d8form)
+        d8score <- date_scorer[d8index]
+        d8format <- date_format[d8index]
+
+        switch(d8index, 
+               MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- str_extract(d8,mdy_dextr)}, 
+               MDY = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- str_extract(d8,mdy_dextr)},
+               MY = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- "01"},
+               DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+               d8mth <- str_extract(d8,dmy_mextr)
+               d8day <- str_extract(d8,dmy_dextr)},
+               DMY = {d8yr <- str_extract(d8,dmy_yextr)
+               d8mth <- str_extract(d8,dmy_mextr)
+               d8day <- str_extract(d8,dmy_dextr)},
+               YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+               d8mth <- str_extract(d8,ymd_mextr)
+               d8day <- str_extract(d8,ymd_dextr)},
+               YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+               YM = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- "01"},
+               Y = {d8yr <- str_extract(d8,ymd_yextr)
+               d8mth <- "01"
+               d8day <- "01"})
+        mdpd_yr <- d8yr %>% as.integer()
+        mdpd_mth <- d8mth %>% as.integer()
+        mdpd_day <- d8day %>% as.integer()
+        MDPubDatect <- as.POSIXct(glue_collapse(c(mdpd_yr,mdpd_mth,mdpd_day),sep = "-"),
+                                  tryFormats = c("%Y-%m-%d"))
+        
+        if (d8yr > ctyr){
+          futuredate <- TRUE
+        } else if (d8yr < ctyr){
+          futuredate <- FALSE
+        } else if (d8yr == ctyr){
+          if (d8mth > ctmth){
+            futuredate <- TRUE
+          } else if (d8mth < ctmth){
+            futuredate <- FALSE
+          } else if (d8mth == ctmth){
+            if (d8day > ctdy) {
+              futuredate <- TRUE
+            } else { futuredate <- FALSE}
+          }
+        }
+      } else if (str_detect(MD_PubDate,blanktester)){
+        d8format <- "blank"
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      } else {
+        d8format <- "unk"
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      }
+      # write out:
+      api_qcresults$`MD-PubDate-Exists`[x] <- d8exists
+      api_qcresults$`MD-PubDate-Format`[x] <- d8format
+      api_qcresults$`MD-PubDate-Valid`[x] <- d8valid
+      api_qcresults$`MD-PubDate-FutureDate`[x] <-futuredate
+      api_qcresults$`MD-PubDate-QC-Score`[x] <- d8score
+      d8exists <- FALSE
+      
+      # ........................MD-LUpDate QC.................................
+      MD_LUpDate <- paste0(api_res$metadata_modified[j])
+      MD_LUpDate <- str_replace_na(MD_LUpDate, "NA")
+      api_results$`Last Update Date (Metadata)`[x] <- MD_LUpDate
+      d8exists <- str_detect(MD_LUpDate,date_regex)
+      if (d8exists){
+        d8 <- MD_LUpDate
+        mdlupdateexists <- d8exists
+        # if it "looks like a date," test if valid:
+        d8valid <- str_detect(d8, datev)
+        # Then attempt to find the date's format:
+        d8len <- str_length(d8)
+        d8form <- c(str_length(str_extract(d8,mdytv)),
+                    str_length(str_extract(d8,mdyv)),
+                    str_length(str_extract(d8,myv)),
+                    str_length(str_extract(d8,dmytv)),
+                    str_length(str_extract(d8,dmyv)),
+                    str_length(str_extract(d8,ymdtv)),
+                    str_length(str_extract(d8,ymdv)),
+                    str_length(str_extract(d8,ymv)),
+                    str_length(str_extract(d8,yv)))
+        d8form <- d8len == d8form
+        d8index <- match(TRUE,d8form)
+        d8score <- date_scorer[d8index]
+        d8format <- date_format[d8index]
+
+        switch(d8index, 
+               MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- str_extract(d8,mdy_dextr)}, 
+               MDY = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- str_extract(d8,mdy_dextr)},
+               MY = {d8yr <- str_extract(d8,mdy_yextr)
+               d8mth <- str_extract(d8,mdy_mextr)
+               d8day <- "01"},
+               DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+               d8mth <- str_extract(d8,dmy_mextr)
+               d8day <- str_extract(d8,dmy_dextr)},
+               DMY = {d8yr <- str_extract(d8,dmy_yextr)
+               d8mth <- str_extract(d8,dmy_mextr)
+               d8day <- str_extract(d8,dmy_dextr)},
+               YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+               d8mth <- str_extract(d8,ymd_mextr)
+               d8day <- str_extract(d8,ymd_dextr)},
+               YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+               YM = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- "01"},
+               Y = {d8yr <- str_extract(d8,ymd_yextr)
+               d8mth <- "01"
+               d8day <- "01"})
+        mdlupd_yr <- d8yr %>% as.integer()
+        mdlupd_mth <- d8mth %>% as.integer()
+        mdlupd_day <- d8day %>% as.integer()
+        MDLUpDatect <- as.POSIXct(glue_collapse(c(mdlupd_yr,mdlupd_mth,mdlupd_day),sep = "-"),
+                           tryFormats = c("%Y-%m-%d"))
+        
+        if (d8yr > ctyr){
+          futuredate <- TRUE
+        } else if (d8yr < ctyr){
+          futuredate <- FALSE
+        } else if (d8yr == ctyr){
+          if (d8mth > ctmth){
+            futuredate <- TRUE
+          } else if (d8mth < ctmth){
+            futuredate <- FALSE
+          } else if (d8mth == ctmth){
+            if (d8day > ctdy) {
+              futuredate <- TRUE
+            } else { futuredate <- FALSE}
+          }
+        }
+      } else if (str_detect(MD_LUpDate,blanktester)){
+        d8format <- "blank"
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      } else {
+        d8format <- "unk"
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      }
+      # write out:
+      api_qcresults$`MD-LUpDate-Exists`[x] <- d8exists
+      api_qcresults$`MD-LUpDate-Format`[x] <- d8format
+      api_qcresults$`MD-LUpDate-Valid`[x] <- d8valid
+      api_qcresults$`MD-LUpDate-FutureDate`[x] <-futuredate
+      api_qcresults$`MD-LUpDate-QC-Score`[x] <- d8score
+      d8exists <- FALSE
+      
+      
+      if (str_length(tempdates) == 0){
+        d8exists <- FALSE
+        d8format <- "blank"
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+        # D-PubDatewrite out:
+        api_qcresults$`D-PubDate-Exists`[x] <- d8exists
+        api_qcresults$`D-PubDate-Format`[x] <- d8format
+        api_qcresults$`D-PubDate-Valid`[x] <- d8valid
+        api_qcresults$`D-PubDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-PubDate-QC-Score`[x] <- d8score
+        # D-CreateDate write out:
+        api_qcresults$`D-CreateDate-Exists`[x] <- d8exists
+        api_qcresults$`D-CreateDate-Format`[x] <- d8format
+        api_qcresults$`D-CreateDate-Valid`[x] <- d8valid
+        api_qcresults$`D-CreateDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-CreateDate-QC-Score`[x] <- d8score
+        # D-LUpDate write out:
+        api_qcresults$`D-LUpDate-Exists`[x] <- d8exists
+        api_qcresults$`D-LUpDate-Format`[x] <- d8format
+        api_qcresults$`D-LUpDate-Valid`[x] <- d8valid
+        api_qcresults$`D-LUpDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-LUpDate-QC-Score`[x] <- d8score
+        
+      } else {
+        # ........................D-PubDate QC.................................
+        # Because of how data set dates are stored, we start with an exists test
+        dpubdexist <- str_detect(tempdates, pubdate_extr)
+        if (is_empty(dpubdexist)){
+          d8exists <- FALSE
+          d8format <- "blank"
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+          dpubdexist <- FALSE
+        } else {
+          if (dpubdexist){
+            D_PubDate <- str_extract(tempdates,pubdate_extr)
+          } else {
+            dpubdexist <- str_detect(tempextra$value[str_which(tempextra$key,"issued")], date_regex)
+            dpubdexist <- if (is_empty(dpubdexist)){FALSE} else {dpubdexist}
+            if (dpubdexist){
+              D_PubDate <- str_extract(tempextra$value[str_which(tempextra$key,"issued")], date_regex)
+            } else {
+              D_PubDate <- ""
+            }
+          }
+          d8exists <- str_detect(D_PubDate,date_regex)
+          if (d8exists){
+            d8 <- D_PubDate
+            dpubdexist <- d8exists
+            # if it "looks like a date," test if valid:
+            d8valid <- str_detect(d8, datev)
+            # Then attempt to find the date's format:
+            d8len <- str_length(d8)
+            d8form <- c(str_length(str_extract(d8,mdytv)),
+                        str_length(str_extract(d8,mdyv)),
+                        str_length(str_extract(d8,myv)),
+                        str_length(str_extract(d8,dmytv)),
+                        str_length(str_extract(d8,dmyv)),
+                        str_length(str_extract(d8,ymdtv)),
+                        str_length(str_extract(d8,ymdv)),
+                        str_length(str_extract(d8,ymv)),
+                        str_length(str_extract(d8,yv)))
+            d8form <- d8len == d8form
+            d8index <- match(TRUE,d8form)
+            d8score <- date_scorer[d8index]
+            d8format <- date_format[d8index]
+            
+            switch(d8index, 
+                   MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+                   d8mth <- str_extract(d8,mdy_mextr)
+                   d8day <- str_extract(d8,mdy_dextr)}, 
+                   MDY = {d8yr <- str_extract(d8,mdy_yextr)
+                   d8mth <- str_extract(d8,mdy_mextr)
+                   d8day <- str_extract(d8,mdy_dextr)},
+                   MY = {d8yr <- str_extract(d8,mdy_yextr)
+                   d8mth <- str_extract(d8,mdy_mextr)
+                   d8day <- "01"},
+                   DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+                   d8mth <- str_extract(d8,dmy_mextr)
+                   d8day <- str_extract(d8,dmy_dextr)},
+                   DMY = {d8yr <- str_extract(d8,dmy_yextr)
+                   d8mth <- str_extract(d8,dmy_mextr)
+                   d8day <- str_extract(d8,dmy_dextr)},
+                   YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- str_extract(d8,ymd_dextr)},
+                   YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- str_extract(d8,ymd_dextr)},
+                   YM = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- "01"},
+                   Y = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- "01"
+                   d8day <- "01"})
+            pd_yr <- d8yr %>% as.integer()
+            pd_mth <- d8mth %>% as.integer()
+            pd_day <- d8day %>% as.integer()
+            dpdct <- as.POSIXct(glue_collapse(c(pd_yr,pd_mth,pd_day),sep = "-"),
+                                tryFormats = c("%Y-%m-%d"))
+            if (d8yr > ctyr){
+              futuredate <- TRUE
+            } else if (d8yr < ctyr){
+              futuredate <- FALSE
+            } else if (d8yr == ctyr){
+              if (d8mth > ctmth){
+                futuredate <- TRUE
+              } else if (d8mth < ctmth){
+                futuredate <- FALSE
+              } else if (d8mth == ctmth){
+                if (d8day > ctdy) {
+                  futuredate <- TRUE
+                } else { futuredate <- FALSE}
+              }
+            } else {futuredate <- FALSE}
+            
+          } else if (str_detect(D_PubDate,blanktester)){
+            d8format <- "blank"
+            d8valid <- FALSE
+            futuredate <- FALSE
+            d8score <- as.integer(0)
+          } else {
+            d8format <- "unk"
+            d8valid <- FALSE
+            futuredate <- FALSE
+            d8score <- as.integer(0)
+          }
+        }
+        # write out:
+        api_qcresults$`D-PubDate-Exists`[x] <- d8exists
+        api_qcresults$`D-PubDate-Format`[x] <- d8format
+        api_qcresults$`D-PubDate-Valid`[x] <- d8valid
+        api_qcresults$`D-PubDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-PubDate-QC-Score`[x] <- d8score
+        
+        # ........................D-CreateDate QC.................................
+        # Because of how data set dates are stored, we start with an exists test
+        dcreatedexist <- str_detect(tempdates, createdate_extr)
+        if (is_empty(dcreatedexist)){
+          d8exists <- FALSE
+          d8format <- "blank"
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else {
+        if (dcreatedexist){
+          D_CreateDate <- str_extract(tempdates,createdate_extr)
+        } else {
+          D_CreateDate <- ""
+        }
+        d8exists <- str_detect(D_CreateDate,date_regex)
+        if (d8exists){
+          d8 <- D_CreateDate
+          dcreatedexist <- d8exists
+          # if it "looks like a date," test if valid:
+          d8valid <- str_detect(d8, datev)
+          # Then attempt to find the date's format:
+          d8len <- str_length(d8)
+          d8form <- c(str_length(str_extract(d8,mdytv)),
+                      str_length(str_extract(d8,mdyv)),
+                      str_length(str_extract(d8,myv)),
+                      str_length(str_extract(d8,dmytv)),
+                      str_length(str_extract(d8,dmyv)),
+                      str_length(str_extract(d8,ymdtv)),
+                      str_length(str_extract(d8,ymdv)),
+                      str_length(str_extract(d8,ymv)),
+                      str_length(str_extract(d8,yv)))
+          d8form <- d8len == d8form
+          d8index <- match(TRUE,d8form)
+          d8score <- date_scorer[d8index]
+          d8format <- date_format[d8index]
+          
+          switch(d8index, 
+                 MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)}, 
+                 MDY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)},
+                 MY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- "01"},
+                 DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 DMY = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YM = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- "01"},
+                 Y = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- "01"
+                 d8day <- "01"})
+          cd_yr <- d8yr %>% as.integer()
+          cd_mth <- d8mth %>% as.integer()
+          cd_day <- d8day %>% as.integer()
+          cdct <- as.POSIXct(glue_collapse(c(cd_yr,cd_mth,cd_day),sep = "-"),
+                             tryFormats = c("%Y-%m-%d"))
+          if (d8yr > ctyr){
+            futuredate <- TRUE
+          } else if (d8yr < ctyr){
+            futuredate <- FALSE
+          } else if (d8yr == ctyr){
+            if (d8mth > ctmth){
+              futuredate <- TRUE
+            } else if (d8mth < ctmth){
+              futuredate <- FALSE
+            } else if (d8mth == ctmth){
+              if (d8day > ctdy) {
+                futuredate <- TRUE
+              } else { futuredate <- FALSE}
+            }
+          } else {futuredate <- FALSE}
+        } else if (str_detect(D_CreateDate,blanktester)){
+          d8format <- "blank"
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else {
+          d8format <- "unk"
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        }
+        }
+        # write out:
+        api_qcresults$`D-CreateDate-Exists`[x] <- d8exists
+        api_qcresults$`D-CreateDate-Format`[x] <- d8format
+        api_qcresults$`D-CreateDate-Valid`[x] <- d8valid
+        api_qcresults$`D-CreateDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-CreateDate-QC-Score`[x] <- d8score
+        
+        # ........................D-LUpDate QC.................................
+        # Because of how data set dates are stored, we start with an exists test
+        dlupdatedexist1 <- str_detect(tempdates, lastupdate_extr)
+        dlupdatedexist2 <- str_detect(tempdates, revisiondate_extr)
+        if (dlupdatedexist1 || dlupdatedexist2) {
+          if (dlupdatedexist1) {
+            D_LUpDatet <- str_extract_all(tempdates, lastupdate_extr)
+          } else if (dlupdatedexist2) {
+            D_LUpDatet <- str_extract_all(tempdates, revisiondate_extr)
+          }
+          if (length(D_LUpDatet[[1]]) > 1) {
+            # A data set may have multiple revision dates.
+            # If so, unlist and sort the strings from most recent to
+            # oldest. Take the latest revision date only.
+            D_LUpDatet <- str_sort(unlist(D_LUpDatet), decreasing = TRUE)
+            D_LUpDate <- D_LUpDatet[1]
+          } else {
+            D_LUpDate <- paste0(D_LUpDatet)
+          }
+        } else {
+          if (is_empty(str_which(tempextra$key,"modified"))){
+            D_LUpDate <- ""
+            d8format <- "blank"
+            d8valid <- FALSE
+            futuredate <- FALSE
+            d8score <- as.integer(0)
+          } else {
+            dmodexist <- str_detect(tempextra$value[str_which(tempextra$key,"modified")],date_regex)
+            if (dmodexist){
+              D_LUpDate <- str_extract(tempextra$value[str_which(tempextra$key,"modified")],date_regex)
+            } else {
+              D_LUpDate <- ""
+            }
+          }
+        }
+        D_LUpDate <- str_replace_na(D_LUpDate, "NA")
+        d8exists <- str_detect(D_LUpDate,date_regex)
+        if (d8exists){
+          d8 <- D_LUpDate
+          # if it "looks like a date," test if valid:
+          d8valid <- str_detect(d8, datev)
+          # Then attempt to find the date's format:
+          d8len <- str_length(d8)
+          d8form <- c(str_length(str_extract(d8,mdytv)),
+                      str_length(str_extract(d8,mdyv)),
+                      str_length(str_extract(d8,myv)),
+                      str_length(str_extract(d8,dmytv)),
+                      str_length(str_extract(d8,dmyv)),
+                      str_length(str_extract(d8,ymdtv)),
+                      str_length(str_extract(d8,ymdv)),
+                      str_length(str_extract(d8,ymv)),
+                      str_length(str_extract(d8,yv)))
+          d8form <- d8len == d8form
+          d8index <- match(TRUE,d8form)
+          d8score <- date_scorer[d8index]
+          d8format <- date_format[d8index]
+          
+          switch(d8index, 
+                 MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)}, 
+                 MDY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)},
+                 MY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- "01"},
+                 DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 DMY = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YM = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- "01"},
+                 Y = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- "01"
+                 d8day <- "01"})
+          lupd_yr <- d8yr %>% as.integer()
+          lupd_mth <- d8mth %>% as.integer()
+          lupd_day <- d8day %>% as.integer()
+          lupdct <- as.POSIXct(glue_collapse(c(lupd_yr,lupd_mth,lupd_day),sep = "-"),
+                               tryFormats = c("%Y-%m-%d"))
+          if (d8yr > ctyr){
+            futuredate <- TRUE
+          } else if (d8yr < ctyr){
+            futuredate <- FALSE
+          } else if (d8yr == ctyr){
+            if (d8mth > ctmth){
+              futuredate <- TRUE
+            } else if (d8mth < ctmth){
+              futuredate <- FALSE
+            } else if (d8mth == ctmth){
+              if (d8day > ctdy) {
+                futuredate <- TRUE
+              } else { futuredate <- FALSE}
+            }
+          } else {futuredate <- FALSE}
+        } else if (str_detect(D_LUpDate,blanktester)){
+          d8format <- "blank"
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else {
+          d8format <- "unk"
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        }
+        # D-LUpDate write out:
+        api_qcresults$`D-LUpDate-Exists`[x] <- d8exists
+        api_qcresults$`D-LUpDate-Format`[x] <- d8format
+        api_qcresults$`D-LUpDate-Valid`[x] <- d8valid
+        api_qcresults$`D-LUpDate-FutureDate`[x] <-futuredate
+        api_qcresults$`D-LUpDate-QC-Score`[x] <- d8score
+      }
+        
+      # .........................Temporal Extent QC...........................
+      # Testing the "Extra" portion of the API data pull for these tags:
+      te_extentst <- sum(str_detect(tempextra$key, "temporal-extent-begin"))
+      te_extentft <- sum(str_detect(tempextra$key, "temporal-extent-end"))
+      # .............................TEBegin QC...............................
+      if (te_extentst == 1) { # If we see the tag, then start extracting:
+        te_beginloc <- str_which(tempextra$key, "temporal-extent-begin")
+        t_extents <- paste0(str_trim(tempextra$value[[te_beginloc]]))
+        # Test if the date is a date or if it is something else:
+        d8exists <- str_detect(t_extents,date_regex)
+        if (d8exists){
+          d8 <- t_extents
+          te_beginexists <- d8exists
+          # if it "looks like a date," test if valid:
+          d8valid <- str_detect(d8, datev)
+          # Then attempt to find the date's format:
+          d8len <- str_length(d8)
+          d8form <- c(str_length(str_extract(d8,mdytv)),
+                      str_length(str_extract(d8,mdyv)),
+                      str_length(str_extract(d8,myv)),
+                      str_length(str_extract(d8,dmytv)),
+                      str_length(str_extract(d8,dmyv)),
+                      str_length(str_extract(d8,ymdtv)),
+                      str_length(str_extract(d8,ymdv)),
+                      str_length(str_extract(d8,ymv)),
+                      str_length(str_extract(d8,yv)))
+          d8form <- d8len == d8form
+          d8index <- match(TRUE,d8form)
+          d8score <- date_scorer[d8index]
+          d8format <- date_format[d8index]
+
+          switch(d8index, 
+                 MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)}, 
+                 MDY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)},
+                 MY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- "01"},
+                 DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 DMY = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- str_extract(d8,ymd_dextr)},
+                 YM = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- "01"},
+                 Y = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- "01"
+                 d8day <- "01"})
+          tebd_yr <- d8yr %>% as.integer()
+          tebd_mth <- d8mth %>% as.integer()
+          tebd_day <- d8day %>% as.integer()
+          tebeginct <- as.POSIXct(glue_collapse(c(tebd_yr,tebd_mth,tebd_day),sep = "-"),
+                               tryFormats = c("%Y-%m-%d"))
+          if (d8yr > ctyr){
+            futuredate <- TRUE
+          } else if (d8yr < ctyr){
+            futuredate <- FALSE
+          } else if (d8yr == ctyr){
+            if (d8mth > ctmth){
+              futuredate <- TRUE
+            } else if (d8mth < ctmth){
+              futuredate <- FALSE
+            } else if (d8mth == ctmth){
+              if (d8day > ctdy) {
+                futuredate <- TRUE
+              } else { futuredate <- FALSE}
+            }
+          } else {futuredate <- FALSE}
+        } else if (str_detect(t_extents,temporalnote)){
+          d8format <- "tag"
+          te_beginexists <- FALSE
+          d8valid <- TRUE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else if (str_detect(t_extents,blanktester)){
+          d8format <- "blank"
+          te_beginexists <- FALSE
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else {
+          d8format <- "unk"
+          te_beginexists <- FALSE
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        }
+      } else { # No data present
+        d8format <- "blank"
+        te_beginexists <- FALSE
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      }
+      # write out:
+      api_qcresults$`D-TEBegin-Exists`[x] <- d8exists
+      api_qcresults$`D-TEBegin-Format`[x] <- d8format
+      api_qcresults$`D-TEBegin-Valid`[x] <- d8valid
+      api_qcresults$`D-TEBegin-FutureDate`[x] <- futuredate
+      api_qcresults$`D-TEBegin-QC-Score`[x] <- d8score
+      # ..............................TEEnd QC................................
+      if (te_extentft == 1) {
+        te_endloc <- str_which(tempextra$key, "temporal-extent-end")
+        t_extentf <- paste0(tempextra$value[[te_endloc]])
+        # Test if the date is a date or if it is something else:
+        d8exists <- str_detect(t_extentf,date_regex)
+        if (d8exists){
+          d8 <- t_extentf
+          te_endexists <- d8exists
+          # if it "looks like a date," test if valid:
+          d8valid <- str_detect(d8, datev)
+          # Then attempt to find the date's format:
+          d8len <- str_length(d8)
+          d8form <- c(str_length(str_extract(d8,mdytv)),
+                      str_length(str_extract(d8,mdyv)),
+                      str_length(str_extract(d8,myv)),
+                      str_length(str_extract(d8,dmytv)),
+                      str_length(str_extract(d8,dmyv)),
+                      str_length(str_extract(d8,ymdtv)),
+                      str_length(str_extract(d8,ymdv)),
+                      str_length(str_extract(d8,ymv)),
+                      str_length(str_extract(d8,yv)))
+          d8form <- d8len == d8form
+          d8index <- match(TRUE,d8form)
+          d8score <- date_scorer[d8index]
+          d8format <- date_format[d8index]
+          api_qcresults$`MD-PubDate-QC-Score`[x] <- d8score
+          api_qcresults$`MD-PubDate-Format`[x] <- d8format
+          switch(d8index, 
+                 MDYtime = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)}, 
+                 MDY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- str_extract(d8,mdy_dextr)},
+                 MY = {d8yr <- str_extract(d8,mdy_yextr)
+                 d8mth <- str_extract(d8,mdy_mextr)
+                 d8day <- "01"},
+                 DMYtime = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 DMY = {d8yr <- str_extract(d8,dmy_yextr)
+                 d8mth <- str_extract(d8,dmy_mextr)
+                 d8day <- str_extract(d8,dmy_dextr)},
+                 YMDtime = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- str_extract(d8,ymd_mextr)
+                 d8day <- str_extract(d8,ymd_dextr)},
+                 YMD = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- str_extract(d8,ymd_dextr)},
+                 YM = {d8yr <- str_extract(d8,ymd_yextr)
+                   d8mth <- str_extract(d8,ymd_mextr)
+                   d8day <- "01"},
+                 Y = {d8yr <- str_extract(d8,ymd_yextr)
+                 d8mth <- "01"
+                 d8day <- "01"})
+          teed_yr <- d8yr %>% as.integer()
+          teed_mth <- d8mth %>% as.integer()
+          teed_day <- d8day %>% as.integer()
+          teendct <- as.POSIXct(glue_collapse(c(teed_yr,teed_mth,teed_day),sep = "-"),
+                                  tryFormats = c("%Y-%m-%d"))
+          if (d8yr > ctyr){
+            futuredate <- TRUE
+          } else if (d8yr < ctyr){
+            futuredate <- FALSE
+          } else if (d8yr == ctyr){
+            if (d8mth > ctmth){
+              futuredate <- TRUE
+            } else if (d8mth < ctmth){
+              futuredate <- FALSE
+            } else if (d8mth == ctmth){
+              if (d8day > ctdy) {
+                futuredate <- TRUE
+              } else { futuredate <- FALSE}
+            }
+          } else {futuredate <- FALSE}
+        } else if (str_detect(t_extents,temporalendallowed)){
+          d8format <- "tag"
+          te_endexists <- FALSE
+          d8valid <- TRUE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else if (str_detect(t_extents,blanktester)){
+          d8format <- "blank"
+          te_endexists <- FALSE
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        } else {
+          d8format <- "unk"
+          te_endexists <- FALSE
+          d8valid <- FALSE
+          futuredate <- FALSE
+          d8score <- as.integer(0)
+        }
+      } else { # No data present
+        d8format <- "blank"
+        te_endexists <- FALSE
+        d8valid <- FALSE
+        futuredate <- FALSE
+        d8score <- as.integer(0)
+      }
+      # write out:
+      api_qcresults$`D-TEEnd-Exists`[x] <- d8exists
+      api_qcresults$`D-TEEnd-Format`[x] <- d8format
+      api_qcresults$`D-TEEnd-Valid`[x] <- d8valid
+      api_qcresults$`D-TEEnd-FutureDate`[x] <- futuredate
+      api_qcresults$`D-TEEnd-QC-Score`[x] <- d8score
+      
+      # ....................Dates Cross-Check QC..............................
+      # Various QC checks for if certain dates occur before others
+      # None of these carry score penalties but may be items of concern
+      # to the respective bureaus
+      
+      # Data set publication date before creation date:
+      if (dpubdexist && dcreatedexist) {
+        if (dpdct <= cdct){
+          api_qcresults$`D-PubDate-BeforeCreateDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-PubDate-BeforeCreateDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-PubDate-BeforeCreateDate`[x] <- FALSE
+      }
+     
+      # Data set last update date date before creation date:
+      if ((dlupdatedexist1 || dlupdatedexist2) && dcreatedexist) {
+        if (lupdct <= cdct){
+          api_qcresults$`D-LUpDate-BeforeCreateDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-LUpDate-BeforeCreateDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-LUpDate-BeforeCreateDate`[x] <- FALSE
+      }
+        
+      # Data set last update date date before publication date:
+      if ((dlupdatedexist1 || dlupdatedexist2) && dpubdexist) {
+        if (lupdct <= dpdct){
+          api_qcresults$`D-LUpDate-BeforePubDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-LUpDate-BeforePubDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-LUpDate-BeforePubDate`[x] <- FALSE
+      }
+      
+      # Metadata Last Update before metadata publication date:
+      if (mdpubdateexists && mdlupdateexists) {
+        if (MDLUpDatect < MDPubDatect) {
+          api_qcresults$`MD-LUpDate-BeforeMDPubDate`[x] <- TRUE
+        } else {
+          api_qcresults$`MD-LUpDate-BeforeMDPubDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`MD-LUpDate-BeforeMDPubDate`[x] <- FALSE
+      }
+      
+      # Temporal Extent Ends after last update
+      if (tedate && (dlupdatedexist1 || dlupdatedexist2)) {
+        if (lupdct <= teendct){
+          api_qcresults$`D-TEEnd-Value-After-LUpDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-TEEnd-Value-After-LUpDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-TEEnd-Value-After-LUpDate`[x] <- FALSE
+      }
+      
+      # TE End Before TE Begin:
+      if (te_endexists && te_beginexists) {
+        if (teendct <= tebeginct) {
+          api_qcresults$`D-TEEnd-Value-Before-TEBeginDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-TEEnd-Value-Before-TEBeginDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-TEEnd-Value-Before-TEBeginDate`[x] <- FALSE
+      }    
+            
+      # TE Begin Before data set creation date:
+      if (te_beginexists && dcreatedexist) {
+        if (tebeginct <= cdct) {
+          api_qcresults$`D-TEBegin-Value-Before-CreateDate`[x] <- TRUE
+        } else {
+          api_qcresults$`D-TEBegin-Value-Before-CreateDate`[x] <- FALSE
+        }
+      } else {
+        api_qcresults$`D-TEBegin-Value-Before-CreateDate`[x] <- FALSE
+      }
+        
+      # .......................FreqofUpdate QC................................
+      frequpdatetest <- str_detect(tempextra$key, "frequency-of-update|accrualPeriodicity")
+      frequpdatetester <- sum(frequpdatetest)
+      if (frequpdatetester >= 1) {
+        frequpi <- which(frequpdatetest)
+        freqofupdate <- glue_collapse(str_replace_na(tempextra$value[frequpi],
+                                                     "NA"),sep = "|")
+        api_results$FreqofUpdate[x] <- freqofupdate
+        if (str_length(freqofupdate) == 0) {
+          frequpdateexists <- FALSE
+        } else {
+          frequpdateexists <- TRUE
+        }
+        if (frequpdateexists) {
+          freqvalid <- str_detect(freqofupdate, frequpdateallowedFGDC)
+        }
+        if (freqvalid) {
+          api_qcresults$`FreqofUpdate-Valid`[x] <- TRUE
+          api_qcresults$`FreqofUpdate-Score`[x] <- 1
+        } else {
+          api_qcresults$`FreqofUpdate-Valid`[x] <- FALSE
+          api_qcresults$`FreqofUpdate-Score`[x] <- 0
+        }
+      } else {
+        frequpdateexists <- FALSE
+        api_qcresults$`FreqofUpdate-Valid`[x] <- FALSE
+        api_qcresults$`FreqofUpdate-Score`[x] <- 0
+      }
+      
+      # .................Reference_System_Identifier QC.......................
+      refsystest <- !is_empty(str_which(tempextra$key, "spatial-reference-system"))
+      
+      if (refsystest){
+        refsysid <- tempextra$value[[refsystest]]
+        refsysid <- str_replace_na(refsysid, "NA")
+        if (str_length(refsysid) == 0) {
+          refsysidexists <- FALSE
+          api_qcresults$`RefSysID-Score`[x] <- 0
+        } else {
+          refsysidexists <- TRUE
+          api_qcresults$`RefSysID-Score`[x] <- 1
+        }
+      } else {
+        refsysid <- blankify
+        refsysidexists <- FALSE
+        api_qcresults$`RefSysID-Score`[x] <- 0
+      }
+      api_results$`Reference System Identifier`[x] <- refsysid
+      api_qcresults$`Reference_System_Identifier-Exists`[x] <- refsysidexists
+      
+      # ..........................RespParty QC................................
+      rolecodeloc <- str_which(tempextra$key, "responsible-party")
+      rolecodetagtest <- !is_empty(rolecodeloc)
+      if (rolecodetagtest) {
+        respparty <- tempextra$value[[rolecodeloc]]
+        respparty <- str_remove_all(respparty, anypunct)
+        rolecode <- unique(unlist(str_extract_all(respparty, role_extr)))
+        rolecodetest <- (sum(str_detect(rolecode, resppartyrolecodes)) >= 1)
+        if (rolecodetest) {
+          api_qcresults$`RespParty-Score`[x] <- 1
+        } else {
+          api_qcresults$`RespParty-Score`[x] <- 0
+        }
+      } else {
+        rolecode <- blankify
+        rolecodetest <- FALSE
+        api_qcresults$`RespParty-Score`[x] <- 0
+      }
+      api_results$`RespParty-RoleCode`[x] <- rolecode
+      api_qcresults$`RespParty-Check`[x] <- rolecodetest
+      
+      # ..........................ProgressCode QC................................
+      progresscodeloc <- str_which(tempextra$key, "progress")
+      if (is_empty(progresscodeloc)){
+        # No key-value pair with key "progress"; search on values for codes
+        progresscodeloc <- str_which(tempextra$value,progresscodeallowedFGDC)
+        if (is_empty(progresscodeloc)){
+          # No progress codes detected
+          progresscode <- blankify
+          pctest <- FALSE
+        } else {
+          # Found a match in the value side of the tempextra
+          if (length(progresscodeloc == 1)){
+            # Verify that we have just one key-value match
+            progresscode <- tempextra$value[progresscodeloc]
+            pctest <- TRUE
+            api_results$ProgressCode[x] <- progresscode
+          } else {
+            # If we have an array of matches (key-value), extract all
+            progresscode <- glue_collapse(tempextra$value[progresscodeloc],sep = "|")
+            pctest <- TRUE
+            api_results$ProgressCode[x] <- progresscode
+          }
+        }
+      } else {
+        # Where we find the progress code in key-value pair with key "progress"
+        progresscode <- tempextra$value[progresscodeloc]
+        pctest <- str_detect(progresscode, progresscodeallowedFGDC)
+        api_results$ProgressCode[x] <- progresscode
+        
+        if (pctest) {
+          api_qcresults$`ProgressCode-Valid`[x] <- pctest
+          api_qcresults$`ProgressCode-Score`[x] <- 1
+        } else {
+          api_qcresults$`ProgressCode-Valid`[x] <- pctest
+          api_qcresults$`ProgressCode-Score`[x] <- 0
+        }
+      }
+      
+      # ...........................Keywords QC................................
+      keywordscount <- api_res$num_tags[j]
+      api_qcresults$`Keywords-TagCount`[x] <- as.integer(keywordscount)
+      if (keywordscount > 0) {
+        # Set truncation flags:
+        ktrunc <- FALSE
+        uktrunc <- FALSE
+        dktrunc <- FALSE
+        mktrunc <- FALSE
+        pktrunc <- FALSE
+        # and describe limit of how many max keywords to output b4 truncating
+        keyprintlim <- 250
+        # We have at least 1 keyword, initialize keyword score counter. Points
+        # are added only; no deductions are made.
+        # Standard keyword tests for each record:
+        #   -duplicating tags (no penalty) vs. not duplicating tags (+1)
+        #   -duplicating keywords (testing inside all tags) (no penalty) vs. not (+1)
+        #   -multiple words within keyword tag (no penalty) vs. not (+1)
+        #   -keywords that contain punctuation marks (no penalty) vs. not (+1)
+        #   -keywords that contain NGDA theme words (+1 bonus point)
+        # NGDA tests are additive only (not penalized) for an extra 8 points
+        # on top of regular tests. 
+        # NGDA tests for NGDA records search both the tag and within the tag
+        # for:
+        #   -NGDAID (+1) and NGDAID matches FGDC (+1)
+        #   -"NGDA" (within a single tag and among all tags)
+        #   -"National Geospatial Data Asset" tag
+        #   -NGDA theme tag matches expected FGDC them
+        # 
+        # Score breakdown:
+        #   Non-NGDA data set
+        #          Max score: 6
+        #          Min score: 1
+        #       NGDA data set
+        #          Max score: 14 (up to +8 extra points from base)
+        #          Min score: 1
+        # If there are no keywords present, the score is set to 0.
+        if (keywordscount > keyprintlim){
+          ktrunc <- TRUE
+        } else {
+          ktrunc <- FALSE
+        }
+        keywordqcscore <- 1
+        # Set the keyword message to blank:
+        keywrdmsg <- blankify
+        # Initialize various QC boolean flags used/updated below:
+        keywordsexist <- TRUE
+        ngdatagflag <- FALSE
+        ngdaltagflag <- FALSE
+        ngdaidtagflag <- FALSE
+        ngdathemeflag <- FALSE
+        
+        # Coerce tags from list to data frame:
+        keywordsdf <- as.data.frame(api_res$tags[j])
+        # Test for duplicated tags:
+        kduptest <- anyDuplicated(keywordsdf$id)
+        if (kduptest > 0) {
+          nodupedtags <- FALSE
+        } else {
+          nodupedtags <- TRUE
+        }
+        if (nodupedtags) {
+          # No keyword tags duplicated
+          keywordqcscore <- keywordqcscore + 1
+          dkeytagnum <- 0
+          ukeytagnum <- keywordscount
+        } else {
+          # Keyword tag(s) duplicate each other
+          dkeytag <- unique(keywordsdf$display_name[
+            duplicated(keywordsdf$id)
+          ])
+          dkeytagl <- as.list(dkeytag)
+          dkeytagnum <- length(dkeytag)
+          ukeytagnum <- length(unique(keywordsdf$id))
+        }
+        # Create a char-vector of the keywords
+        keywordslist <- keywordsdf$display_name
+        # Now, unlist the extracted keywords using our word parser:
+        keywords <- unlist(str_extract_all(keywordslist, wordcounter))
+        # Write the baseline keywords to the results table:
+        if (length(keywords) > keyprintlim){
+          api_results$Keywords[x] <- glue_collapse(keywords[1:keyprintlim], sep = "|")
+        } else {
+          api_results$Keywords[x] <- glue_collapse(keywords, sep = "|")
+        }
+        keywordqc[[x]][["keywords"]] <- keywords
+        # Count the number of unnested words:
+        keywordsnum <- length(keywords)
+        # Next, set unique keywords:
+        ukeywords <- unique(keywords)
+        ukeywordsl <- as.list(ukeywords)
+        # And get a count:
+        ukeywordsnum <- length(ukeywords)
+        if (ukeywordsnum > keyprintlim) {
+          uktrunc <- TRUE
+        } else {
+          uktrunc <- FALSE
+        }
+        if (ukeywordsnum == keywordscount) {
+          keywordqc[[x]][["keywordsunique"]] <- blankify
+        } else {
+          keywordqc[[x]][["keywordsunique"]] <- ukeywords
+        }
+        # Then, find duplicate keywords (if any):
+        dtotalwords <- length(keywords[duplicated(keywords)])
+        dkeywords <- unique(keywords[duplicated(keywords)])
+        dkeywordsl <- as.list(dkeywords)
+        nodupedwords <- is_empty(dkeywords)
+        if (nodupedwords) {
+          keywordqc[[x]][["keywordsduplicated"]] <- blankify
+          keywordqcscore <- keywordqcscore + 1
+        } else {
+          # Do nothing
+        }
+        # And get a count:
+        dkeywordsnum <- length(dkeywords)
+        if (dkeywordsnum > keyprintlim) {
+          dktrunc <- TRUE
+        } else {
+          dktrunc <- FALSE
+        }
+        # Create a message about uniqueness/duplication:
+        if (nodupedtags && nodupedwords) {
+          kdupflag <- FALSE
+          keywrdmsg <- paste0("All tags and keywords within tags are unique=")
+          keywrdmsg <- paste0(keywrdmsg, "tags:", keywordscount, "|words:", ukeywordsnum)
+          keynotes <- keywrdmsg
+        } else if (nodupedtags && !nodupedwords) {
+          kdupflag <- TRUE
+          keywrdmsg <-
+            paste0("All tags unique but duplicate keywords=")
+          if (dktrunc || ktrunc){
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicated_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Truncated list of first ", keyprintlim," duplicate keywords follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywrdmsg,dkeywords[1:keyprintlim])
+          } else {
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicated_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Unique list of duplicate keywords follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywrdmsg,dkeywords)
+          }
+        } else if (!nodupedtags && nodupedwords) {
+          kdupflag <- TRUE
+          # Pretty sure this could never happen b/c if you dupe a tag, you
+          # should automatically dupe the keywords within...
+          keywrdmsg <-
+            paste0("Duplicate tags but unique keywords=")
+          if (ktrunc){
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|duplicate_tags:", dkeytagnum, "|unique_tags:", ukeytagnum, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicate_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Truncated list of first ", keyprintlim," duplicate keyword tags follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywordmsg, dkeytagl[1:keyprintlim])
+          } else {
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|duplicate_tags:", dkeytagnum, "|unique_tags:", ukeytagnum, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicate_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Unique list of duplicate keyword tags follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywordmsg, dkeytagl)
+          }
+        } else if (!nodupedtags && !nodupedwords) {
+          kdupflag <- TRUE
+          keywrdmsg <-
+            paste0("Duplicate tags and duplicate keywords=")
+          if (dktrunc || ktrunc) {
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|duplicate_tags:", dkeytagnum, "|unique_tags:", ukeytagnum, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicate_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Truncated list of first ", keyprintlim, " duplicate keyword tags and keywords follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywrdmsg, "dupetags|", dkeytags[1:keyprintlim], "|dupekeywords|", dkeywords[1:keyprintlim])
+          } else {
+            keywrdmsg <-
+              paste0(
+                keywrdmsg, "tags:", keywordscount, "|duplicate_tags:", dkeytagnum, "|unique_tags:", ukeytagnum, "|words:", keywordsnum, "|unique_words:",
+                ukeywordsnum, "|duplicate_words:", dtotalwords, "|num_dupe_words:", dkeywordsnum, "|Unique list of duplicate keyword tags and keywords follows"
+              )
+            keynotes <- keywrdmsg
+            keywrdmsg <- c(keywrdmsg, "dupetags|", dkeytags, "|dupekeywords|", dkeywords)
+          }
+        } else {
+          # End of keywrdmsg logic train
+        }
+        keywordqc[[x]][["keywordsduplicated"]] <- keywrdmsg
+        # Write preliminary results:
+        api_qcresults$`Keywords-Exist`[x] <- keywordsexist
+        api_qcresults$`Keywords-WordCount`[x] <- as.integer(keywordsnum)
+        api_qcresults$`Keywords-DupedWords`[x] <- as.integer(dtotalwords)
+        api_qcresults$`Keywords-UniqueWords`[x] <- as.integer(ukeywordsnum)
+        
+        # Initialize various aspects of this record in the keyword QC
+        # list-matrix:
+        keywordqc[[x]][["ngda"]] <- blankify
+        keywordqc[[x]][["ngdal"]] <- blankify
+        keywordqc[[x]][["ngdaid"]] <- blankify
+        keywordqc[[x]][["multiword"]] <- blankify
+        keywordqc[[x]][["punct"]] <- blankify
+        keywordqc[[x]][["notes"]] <- blankify
+        ngdatagmsg <- blankify
+        ngdaltagmsg <- blankify
+        ngdaidtagmsg <- blankify
+        ngdathememsg <- blankify
+        keywordnotes <- blankify
+        
+        if (isngda) {
+          # Run tests that apply to only the NGDA data sets:
+          ngdatagtest1 <- sum(str_detect(keywordslist, ngdatago))
+          ngdaltagtest1 <- sum(str_detect(keywordslist, ngdaltago))
+          ngdatagtest2 <- sum(str_detect(keywordslist, ngdatago))
+          ngdaltagtest2 <- sum(str_detect(keywordslist, ngdaltago))
+          ngdaidtagtest1 <- sum(str_detect(keywordslist, ngdaid_exp))
+          ngdaidtagtest11 <- sum(str_detect(keywordslist, ngdaid_expi))
+          ngdaidtagtest2 <- sum(str_detect(keywordslist, ngdaid_gen))
+          ngdathemetest <- sum(str_detect(keywordslist, ngdatheme_exp))
+          
+          # Do we see the tag: NGDA (anywhere, even within other keywords?)
+          if (ngdatagtest1 > 0) {
+            keywordqcscore <- keywordqcscore + 1
+            if (ngdatagtest2 > 0) {
+              # Do we see the tag: NGDA (just this)
+              keywordqcscore <- keywordqcscore + 1
+              ngdatagflag <- TRUE
+              ngdatagmsg <- paste0(keywordslist[str_which(
+                keywordslist,
+                ngdatagc
+              )])
+            } else {
+              ngdatagflag <- FALSE
+              ngdatagmsg <- paste0("QC-1.2:NGDAinsidetag", ngdatagmsg)
+            }
+          } else {
+            ngdatagflag <- FALSE
+            ngdatagmsg <- paste0("QC-1.1:NGDAtagmissing", ngdatagmsg)
+          }
+          # Do we see the tag: National Geospatial Data Asset (anywhere)
+          if (ngdaltagtest1) {
+            keywordqcscore <- keywordqcscore + 1
+            if (ngdaltagtest2) {
+              # Do we see the tag: National Geospatial Data Asset (just this)
+              keywordqcscore <- keywordqcscore + 1
+              ngdaltagflag <- TRUE
+              ngdaltagmsg <- paste0(keywordslist[str_which(
+                keywordslist,
+                ngdaltagc
+              )])
+            } else {
+              ngdaltagflag <- FALSE
+              ngdaltagmsg <- paste0("QC-2.2:NGDALonginsidetag", ngdaltagmsg)
+            }
+          } else {
+            # We do not see the tag: National Geospatial Data Asset (anywhere)
+            ngdaltagflag <- FALSE
+            ngdaltagmsg <- paste0("QC-2.1:NGDALongtagmissing", ngdaltagmsg)
+          }
+          # Do we see the expected tag: NGDAID###
+          # where ### matches the expected ### from FGDC
+          # and do we see this tag anywhere, including within other tags?
+          if (ngdaidtagtest1 > 0) {
+            keywordqcscore <- keywordqcscore + 1
+            # Ok, we see NGDAID### and the numbers match (somewhere)
+            # next test: Do we see the tag NGDAID###, just this & by itself?
+            if (ngdaidtagtest11 > 0) {
+              # We do see the NGDAID### as an isolated tag and
+              # the numbers match, success!
+              keywordqcscore <- keywordqcscore + 1
+              ngdaidtagflag <- TRUE
+              ngdaidtagmsg <- paste0(keywordslist[str_which(
+                keywordslist,
+                ngdaidtagc
+              )])
+            } else {
+              # NGDAID tag present (inside another tag), not isolated:
+              ngdaidf <- keywordslist[str_which(keywordslist, ngdaid_exp)]
+              ngdaidtagmsg <- paste0("QC-3.2:NGDAIDinsidetag", ngdaidtagmsg)
+              ngdaidtagflag <- FALSE
+            }
+          } else if (ngdaidtagtest2 > 0) {
+            # Ok, so we did not see the NGDAID### that matches the FGDC
+            # numbering within the keywords.
+            # Next, do we see just the tag pattern: NGDAID### or no.  ### or 
+            # number0123
+            # and do we see this tag anywhere, including within other tags?
+            
+            # This may indicate that an NGDAID### tag has been erroneously
+            # applied to another record or that this record is "associated"
+            # with the actual NGDAID. For example, a unit within a collection
+            # where the collection is the "actual" NGDAID.
+            ngdaidf <- keywordslist[str_which(keywordslist, ngdaid_gen)]
+            ngdaidtagmsg <- paste0(
+              "QC-3.3:NGDAIDnumbermismatchFGDC-expected:",
+              ngdaid, "|found:", ngdaidf, ngdaidtagmsg
+            )
+            
+            ngdaidtagflag <- FALSE
+          } else {
+            # NGDAID keyword is missing (anywhere, even inside other tags)
+            ngdaidtagmsg <- paste0(
+              "QC-3.1:NGDAIDmissing-expected:", ngdaid,
+              "|", ngdaidtagmsg
+            )
+            ngdaidtagflag <- FALSE
+          }
+          # Do we see a tag corresponding to the NGDA theme?
+          if (ngdathemetest > 0) {
+            keywordqcscore <- keywordqcscore + 2
+            ngdathemeflag <- TRUE
+            ngdathememsg <- paste0(keywordslist[str_which(
+              keywordslist,
+              ngdatheme_exp
+            )])
+          } else {
+            ngdathemeflag <- FALSE
+            ngdathememsg <- paste0(
+              "QC-4:NGDAThememissing-expected:",
+              ngdatheme_exp, "|", ngdathememsg
+            )
+          }
+        } else {
+          # Non-NGDA tests
+          nonngdatagtest <- sum(str_detect(keywordslist, nonngdatags))
+          if (nonngdatagtest > 0) {
+            # We see some tags assigned to the record like:
+            #   NGDA
+            #   National Geospatial Data Asset
+            #   NGDAID###
+            # Within the keywords list. While not necessarily wrong, these
+            # keyword terms are supposed to be "reserved" for only those
+            # data sets labeled as "NGDA" by FGDC.
+            #
+            # Possible reasons why this may happen, in order of likelihood:
+            # 1-Agencies/bureaus are trying to associate individual data sets
+            # that comprise a NGDA-labeled collection. Example: weather data
+            # collection is labeled as NGDA but individual data sets that are
+            # children to this parent collection vary in, say, resolution or
+            # another important factor. Bureau assigns the NGDAID and NGDA
+            # tags to these smaller records to "link" them to the collection.
+            #
+            # 2-(Meta)data on data.gov could be outdated / out of sync
+            # with FGDC...
+            # or
+            # 3-(less likely but still possible) the API/database is sending
+            # incorrect labels/tags back upon us making the call.
+            # Generally, the why is not important, we'll just record results:
+            
+            # Do 3 tests on closed-ended tags normally reserved for NGDA
+            nonngdatagtest1 <- sum(str_detect(keywordslist, ngdatagc))
+            nonngdatagtest2 <- sum(str_detect(keywordslist, ngdaltagc))
+            nonngdatagtest3 <- sum(str_detect(keywordslist, ngdaidtagc))
+            if (nonngdatagtest1 > 0) {
+              # If we see "NGDA"
+              ngdatagflag <- TRUE
+              ngdatagmsg <- paste0("QC-1.3:NGDAassignedtoNon-NGDA")
+            } else {
+              ngdatagflag <- FALSE
+              ngdatagmsg <- blankify
+            }
+            if (nonngdatagtest2 > 0) {
+              # If we see "national geospatial data asset"
+              ngdaltagflag <- TRUE
+              ngdaltagmsg <- paste0("QC-2.3:NGDALongassignedtoNon-NGDA")
+            } else {
+              ngdaltagflag <- FALSE
+              ngdaltagmsg <- blankify
+            }
+            if (nonngdatagtest3 > 0) {
+              # If we see "NGDAID#" (numbers not important)
+              ngdaidtagflag <- TRUE
+              ngdaidtagmsg <- paste0(
+                "QC-3.4:NGDAIDassignedtoNonNGDA", "|",
+                keywordslist[str_which(
+                  keywordslist,
+                  ngdaidtagc
+                )]
+              )
+            } else {
+              ngdaidtagflag <- FALSE
+              ngdaidtagmsg <- blankify
+            }
+          }
+          
+          if (t4sharedelems(keywordslist, ngdathemes)) {
+            # Do we see any NGDA themes assigned to this data set?
+            keywordqcscore <- keywordqcscore + 1
+            ngdathemeflag <- TRUE
+            api_qcresults$`Keywords-NGDATheme`[x] <- TRUE
+            ngdathememsg <- paste0("QC-4.3:NGDAThemeassignedtoNonNGDA")
+          } else {
+            # No NGDA themes assigned, set flag:
+            ngdathemeflag <- FALSE
+            ngdathememsg <- paste0("QC-4.4:NoNGDAThemeassigned")
+          }
+        } # End of Non-NGDA Tests
+        
+        # Multiple words per keyword-tag
+        mwflag <- FALSE
+        wtest <- str_count(keywordslist, wordcounter)
+        mwmax <- max(wtest)
+        mwtest <- (wtest > 1)
+        if (mwmax > 1) {
+          mwflag <- TRUE
+        } else {
+          mwflag <- FALSE
+        }
+        
+        if (mwflag) {
+          mwcounts <- replace(wtest, !mwtest, 0)
+          mwcount <- as.integer(sum(mwcounts))
+          jmwtags <- wtest[mwtest]
+          owcounts <- replace(wtest, mwtest, 0)
+          owcount <- sum(owcounts)
+          jowtags <- wtest[!mwtest]
+          wcount <- as.integer(sum(wtest))
+          if (wcount > keyprintlim){
+            mktrunc <- TRUE
+          } else {
+            mktrunc <- FALSE
+          }
+          mwtagcount <- as.integer(sum(mwtest))
+          mwpercent <- (mwtagcount / keywordscount) * 100
+          mwwrdpercent <- (mwcount / wcount) * 100
+          mn_jmwcount <- mean(jmwtags)
+          md_jmwcount <- median(jmwtags)
+          sd_jmwcount <- sd(jmwtags)
+          mwsurplus <- mn_jmwcount - 1 # allowed 1 word per keyword-tag
+          mwadded <- mwcount - mwtagcount
+          maxmwcount <- max(mwcounts)
+          mn_wcount <- mean(wtest)
+          md_wcount <- median(wtest)
+          sd_wcount <- sd(wtest)
+          
+          # keywordscount <- length(keywordslist)
+          mwmsg1 <- sprintf("The %d keyword tags actually hold %d keywords because %d/%d (%#.1f%%) keyword tags have multiple words inside. ", keywordscount, wcount,mwtagcount, keywordscount,mwpercent)
+          mwmsg2 <- sprintf("These %d keyword tags with multiple words account for %d/%d (%#.1f%%) total words. These %d tags added %d keywords more than expected (%d) at average rate of +%#.3f more keywords/tag than allowed (1/tag).", mwtagcount, mwcount, wcount,mwwrdpercent,mwtagcount, mwadded,mwtagcount, mwsurplus)
+          mwmsg3 <- sprintf("~OverallStats: %d keyword tags have %d words (mean = %#.3f, median = %#.3f, SD = %#.3f).", keywordscount, wcount, mn_wcount, md_wcount, sd_wcount)
+          if (mktrunc){
+            mwmsg4 <- sprintf("~MWTagStats: %d keyword tags have %d words (mean = %#.3f, median = %#.3f, SD = %#.3f, max = %d words/keyword tag).Truncated list of first %d keyword tags with multiple words follow", mwtagcount,mwcount, mn_jmwcount, md_jmwcount, sd_jmwcount, maxmwcount,keyprintlim)
+          } else {
+            mwmsg4 <- sprintf("~MWTagStats: %d keyword tags have %d words (mean = %#.3f, median = %#.3f, SD = %#.3f, max = %d words/keyword tag).Keyword tags with multiple words follow", mwtagcount,mwcount, mn_jmwcount, md_jmwcount, sd_jmwcount, maxmwcount)
+          }
+          
+          api_qcresults$`Keywords-MultiWordTagCount`[x] <- as.integer(mwtagcount)
+          api_qcresults$`Keywords-MultiWordCount`[x] <- as.integer(mwcount)
+          
+          mwmsg <- paste0(mwmsg1, mwmsg2, mwmsg3,mwmsg4)
+          keynotes <- c
+          if (mktrunc){
+            keywordqc[[x]][["multiword"]] <- c(mwmsg, keywordslist[mwtest == TRUE])
+          } else {
+            keywordqc[[x]][["multiword"]] <- c(mwmsg, keywordslist[mwtest == TRUE][1:keyprintlim])
+          }
+          
+        } else {
+          keywordqcscore <- keywordqcscore + 1
+          keywordqc[[x]][["multiword"]] <- blankify
+          api_qcresults$`Keywords-MultiWordTagCount`[x] <- as.integer(0)
+          api_qcresults$`Keywords-MultiWordCount`[x] <- as.integer(0)
+        }
+        
+        # Keyword Punctuation Test per keyword-tag
+        puncttest <- str_count(keywordslist, anypunct_ndoc)
+        punctdetect <- str_detect(keywordslist, anypunct_ndoc)
+        numtagswpunct <- sum(punctdetect)
+        punctcheck <- (puncttest > 0)
+        punctflag <- match(TRUE, punctcheck, nomatch = 0)
+        if (punctflag >= 1) {
+          punctflag <- TRUE
+        } else {
+          punctflag <- FALSE
+        }
+        if (punctflag) {
+          punctcount <- as.integer(sum(puncttest))
+          if (punctcount > keyprintlim){
+            pktrunc <- TRUE
+          } else {
+            pktrunc <- FALSE
+          }
+          punctpercent <- (numtagswpunct / keywordscount) * 100
+          if (pktrunc){
+            pmsg <- paste0(
+              sprintf(
+                "%d of %d (%#.1f%%) keywords contained a total of %d punctuation marks.Truncated list of first %d punctuated keywords follow",
+                numtagswpunct, keywordscount, punctpercent, punctcount, keyprintlim
+              )
+            )
+          } else {
+            pmsg <- paste0(
+              sprintf(
+                "%d of %d (%#.1f%%) keywords contained a total of %d punctuation marks.Punctuated keywords follow",
+                numtagswpunct, keywordscount, punctpercent, punctcount
+              )
+            )
+          }
+          keynotes <- c(keynotes, pmsg)
+          if (pktrunc){
+            keywordqc[[x]][["punct"]] <- c(pmsg, keywordslist[punctdetect == TRUE][1:keyprintlim])
+          } else {
+            keywordqc[[x]][["punct"]] <- c(pmsg, keywordslist[punctdetect == TRUE])
+          }
+          api_qcresults$`Keywords-PunctuationMarkCount`[x] <- as.integer(punctcount)
+          api_qcresults$`Keywords-PunctuatedNumTags`[x] <- as.integer(numtagswpunct)
+        } else {
+          keywordqcscore <- keywordqcscore + 1
+          keywordqc[[x]][["punct"]] <- blankify
+          api_qcresults$`Keywords-PunctuationMarkCount`[x] <- as.integer(0)
+          api_qcresults$`Keywords-PunctuatedNumTags`[x] <- as.integer(0)
+        }
+        if (str_detect(ngdatagmsg,blanktester)){
+          keywordqc[[x]][["ngda"]] <- paste0(ngdatagflag)
+        } else {
+          keywordqc[[x]][["ngda"]] <- paste0(ngdatagflag, "|", ngdatagmsg)
+        }
+        if (str_detect(ngdaltagmsg,blanktester)){
+          keywordqc[[x]][["ngdal"]] <- paste0(ngdaltagflag)
+        } else {
+          keywordqc[[x]][["ngdal"]] <- paste0(ngdaltagflag, "|", ngdaltagmsg)
+        }
+        if (sum(str_detect(ngdaidtagmsg,blanktester)) > 1){
+          keywordqc[[x]][["ngdaid"]] <- paste0(ngdaidtagflag)
+        } else {
+          keywordqc[[x]][["ngdaid"]] <- paste0(ngdaidtagflag, "|", ngdaidtagmsg)
+        }
+        if (sum(str_detect(ngdathememsg,blanktester)) > 1){
+          keywordqc[[x]][["ngdaidtheme"]] <- paste0(ngdathemeflag)
+        } else {
+          keywordqc[[x]][["ngdaidtheme"]] <- paste0(ngdathemeflag,"|",
+                                                    ngdathememsg)
+        }
+        keynotes <- c(keynotes, ngdatagmsg, ngdaltagmsg, ngdaidtagmsg)
+        keywordqc[[x]][["notes"]] <- glue_collapse(keynotes, sep = "|")
+        
+        api_results$`Keywords-Duplicates`[x] <- glue_collapse(keywordqc[[x]][["keywordsduplicated"]], sep = "|")
+        api_results$`Keywords-NGDA`[x] <- glue_collapse(
+          c(
+            keywordqc[[x]][["ngda"]], keywordqc[[x]][["ngdal"]],
+            keywordqc[[x]][["ngdaid"]], keywordqc[[x]][["ngdaidtheme"]]
+          ),
+          sep = "|"
+        )
+        api_results$`Keywords-MultiWords`[x] <- glue_collapse(
+          keywordqc[[x]][["multiword"]],
+          sep = "|"
+        )
+        api_results$`Keywords-Punctuation`[x] <- glue_collapse(
+          keywordqc[[x]][["punct"]],
+          sep = "|"
+        )
+        api_qcresults$`Keywords-Duplicated`[x] <- kdupflag
+        api_qcresults$`Keywords-Duplicates`[x] <- as.integer(dkeywordsnum + dkeytagnum)
+        api_qcresults$`Keywords-NationalGeospatialDataAsset`[x] <- ngdaltagflag
+        api_qcresults$`Keywords-NGDA`[x] <- ngdatagflag
+        api_qcresults$`Keywords-NGDAID#`[x] <- ngdaidtagflag
+        api_qcresults$`Keywords-NGDATheme`[x] <- ngdathemeflag
+        api_qcresults$`Keywords-Punctuation`[x] <- punctflag
+        api_qcresults$`Keywords-MultipleWords`[x] <- mwflag
+        api_qcresults$`Keywords-Score`[x] <- keywordqcscore
+      } else {
+        # No keywords attached to the record:
+        keywordqc[[x]][["keywords"]] <- blankify
+        keywordqc[[x]][["keywordsduplicated"]] <- blankify
+        keywordqc[[x]][["keywordsunique"]] <- blankify
+        keywordqc[[x]][["ngda"]] <- blankify
+        keywordqc[[x]][["ngdal"]] <- blankify
+        keywordqc[[x]][["ngdaid"]] <- blankify
+        keywordqc[[x]][["ngdaidtheme"]] <- blankify
+        keywordqc[[x]][["multiword"]] <- blankify
+        keywordqc[[x]][["punct"]] <- blankify
+        keywordqc[[x]][["notes"]] <- paste0("No keywords attached")
+        keywordqcscore <- 0
+        # No keywords attached
+        api_results$`Keywords-Duplicates`[x] <- glue_collapse(
+          keywordqc[[x]][["keywordsduplicated"]],
+          sep = "|"
+        )
+        api_results$`Keywords-NGDA`[x] <- glue_collapse(
+          c(
+            keywordqc[[x]][["ngda"]], keywordqc[[x]][["ngdal"]],
+            keywordqc[[x]][["ngdaid"]], keywordqc[[x]][["ngdaidtheme"]]
+          ),
+          sep = "|"
+        )
+        api_results$`Keywords-MultiWords`[x] <- glue_collapse(
+          keywordqc[[x]][["multiword"]],
+          sep = "|"
+        )
+        api_results$`Keywords-Punctuation`[x] <- glue_collapse(
+          keywordqc[[x]][["punct"]],
+          sep = "|"
+        )
+        api_qcresults$`Keywords-Exist`[x] <- FALSE
+        api_qcresults$`Keywords-NationalGeospatialDataAsset`[x] <- FALSE
+        api_qcresults$`Keywords-NGDA`[x] <- FALSE
+        api_qcresults$`Keywords-NGDAID#`[x] <- FALSE
+        api_qcresults$`Keywords-NGDATheme`[x] <- FALSE
+        api_qcresults$`Keywords-Punctuation`[x] <- 0
+        api_qcresults$`Keywords-Duplicated`[x] <- FALSE
+        api_qcresults$`Keywords-Duplicates`[x] <- 0
+        api_qcresults$`Keywords-MultipleWords`[x] <- 0
+        api_qcresults$`Keywords-Score`[x] <- 0
+      }
+      # ........................MetadataID-Exists QC..........................
+      mdidfr <- tempextra$value[str_which(tempextra$key, "^(guid|identifier)$")]
+      mdidfr <- str_replace_na(mdidfr, "NA")
+      api_results$`Metadata Identifier`[x] <- mdidfr
+      mdidfr_y <- !str_detect(mdidfr, blanknullna_tester)
+      if (mdidfr_y) {
+        api_qcresults$`MetadataID-Exists`[x] <- TRUE
+        api_qcresults$`MetadataID-Score`[x] <- 1
+      } else {
+        api_qcresults$`MetadataID-Exists`[x] <- FALSE
+        api_qcresults$`MetadataID-Score`[x] <- 0
+      }
+      # ........................CitationID-Exists QC..........................
+      if (str_detect(bname, "Census")) {
+        citidfr <- str_extract(mdidfr, censuscitid)
+      } else if (str_detect(bname, "NOAA")) {
+        citidfr <- str_extract(mdidfr, noaamdidfr)
+      } else {
+        citidfr <- mdidfr
+      }
+      citidfr <- str_replace_na(citidfr, "NA")
+      # Write results and QC
+      citidfr_y <- !str_detect(citidfr, blanknullna_tester)
+      if (citidfr_y) {
+        api_results$`Citation Identifier`[x] <- citidfr
+        api_qcresults$`CitationID-Exists`[x] <- TRUE
+        api_qcresults$`CitationID-Score`[x] <- 1
+      } else {
+        api_results$`Citation Identifier`[x] <- blankify
+        api_qcresults$`CitationID-Exists`[x] <- FALSE
+        api_qcresults$`CitationID-Score`[x] <- 0
+      }
+      # ......................MD-DownloadURL-Exists QC.......................
+      harvid_loc <- str_which(tempextra$key, "harvest_object_id")
+      
+      # harvid_loc <- grep("harvest_object_id",tempextra$key, value = FALSE)
+      # If you do not have Stringr / stringi pkg, can use grep as replacement
+      # for each instance of str_which
+      
+      if (is_empty(harvid_loc) == FALSE) { # We have an Object ID
+        ds_harvestid <- tempextra$value[harvid_loc]
+        ds_harvestlink <- paste0(
+          "https://catalog.data.gov/harvest/object/",
+          ds_harvestid)
+        
+        # Uncomment this code and the "else" conditional below to download MD
+        # files at the same time as the analysis.
+        # Warning: This dramatically slows down script performance 
+        # (best run this overnight / as a background process)
+        
+        # mdfiledownload <- tryCatch(download.file(url = paste0(ds_harvestlink), destfile = paste0(mdff,sprintf("%006d", x), "_", sprintf("%003d", u), "_",sprintf("%003d", b), "_", sprintf("%003d", k), "_", sprintf("%004d", j), "_", dsname, ".xml")), error=function(ef) ef)
+        # dllim <- 0
+        # if (inherits(mdfiledownload,"error")){
+        #   while (inherits(mdfiledownload,"error") || dllim < 6){
+        #     Sys.sleep(5)
+        #     if (dllim < 5){
+        #       mdfiledownload <- tryCatch(download.file(url = paste0(ds_harvestlink), destfile = paste0(mdff,sprintf("%006d", x), "_", sprintf("%003d", u), "_",sprintf("%003d", b), "_", sprintf("%003d", k), "_", sprintf("%004d", j), "_", dsname, ".xml")), error=function(ef) ef)
+        #     } else if (dllim ==5){
+        #       dstempname <- str_to_lower(glue_collapse(str_remove_all(str_remove_all(ds_title,"\\s"),"[:punct:]"), sep = ""))
+        #       mdfiledownload <- tryCatch(download.file(url = paste0(ds_harvestlink), destfile = paste0(mdff,sprintf("%006d", x), "_", sprintf("%003d", u), "_",sprintf("%003d", b), "_", sprintf("%003d", k), "_", sprintf("%004d", j), "_", dstempname, ".xml")), error=function(ef) ef)
+        #     }
+        #     dllim <- dllim + 1
+        #   }
+        #   if (inherits(mdfiledownload,"error") && dllim >=6 ){
+        #     api_MDfiles$MD_DownloadedFlag[x] <- "Fail"
+        #     api_qcresults$`MD-DownloadURL-Exists`[x] <- TRUE
+        #     api_qcresults$`MD-DownloadURL-Score`[x] <- 1
+        #     api_MDfiles$MD_Link[x] <- ds_harvestlink
+        #   }
+        # } else {
+        api_MDfiles$MD_DownloadedFlag[x] <- "Success"
+        api_qcresults$`MD-DownloadURL-Exists`[x] <- TRUE
+        api_qcresults$`MD-DownloadURL-Score`[x] <- 1
+        api_MDfiles$MD_Link[x] <- ds_harvestlink
+        # }
+        
+      } else { # Where Data.gov does not provide a harvest object ID
+        ds_harvestlink <- blankify
+        api_MDfiles$MD_DownloadedFlag[x] <- "NoMD_DL_Link"
+        api_qcresults$`MD-DownloadURL-Exists`[x] <- FALSE
+        api_qcresults$`MD-DownloadURL-Score`[x] <- 0
+        api_MDfiles$MD_Link[x] <- ds_harvestlink
+      }
+      # ...........................Bbox-Exists QC.............................
+      
+      # "bbox-east-long"
+      if (is_empty(str_which(tempextra$key,bbelong))){
+        bbox_e <- blankify
+      } else {
+        bbox_e <- if(str_detect(tempextra$value[str_which(tempextra$key,bbelong)],blanktester)){blankify} else {as.double(tempextra$value[str_which(tempextra$key,bbelong)])}
+      }
+      
+      # "bbox-north-lat"
+      if (is_empty(str_which(tempextra$key,bbnlat))){
+        bbox_n <- blankify
+      } else {
+        bbox_n <- if(str_detect(tempextra$value[str_which(tempextra$key,bbnlat)],blanktester)){blankify} else {as.double(tempextra$value[str_which(tempextra$key,bbnlat)])}
+      }
+      
+      # "bbox-south-lat"
+      if (is_empty(str_which(tempextra$key,bbslat))){
+        bbox_s <- blankify
+      } else {
+        bbox_s <- if(str_detect(tempextra$value[str_which(tempextra$key,bbslat)],blanktester)){blankify} else {as.double(tempextra$value[str_which(tempextra$key,bbslat)])}
+      }
+      
+      # "bbox-west-long"
+      if (is_empty(str_which(tempextra$key,bbwlong))){
+        bbox_w <- blankify
+      } else {
+        bbox_w <- if(str_detect(tempextra$value[str_which(tempextra$key,bbwlong)],blanktester)){blankify} else {as.double(tempextra$value[str_which(tempextra$key,bbwlong)])}
+      }
+      
+      bboxarray <- str_replace_na(c(bbox_e, bbox_n, bbox_s, bbox_w), "NA")
+      bbox_empty <- as.logical(str_replace_na(str_detect(bboxarray,blanktester),"TRUE"))
+      bbox_repairs <- which(bbox_empty)
+      
+      if (sum(bbox_empty) > 0){ 
+        # Begin lat-long recovery procedures:
+        # repair procedures for bbox if coords not located under expected tags:
+        bbox_reg <- regex("(?<=coordinate[s]?|polygon).+[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}[\\s]?,?[\\s]?[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16}",ignore_case = TRUE)
+        bboxscan <- str_detect(tempextra$value,bbox_reg)
+        if (sum(bboxscan) > 0){
+          latlongs <- TRUE
+          arcmins <- FALSE
+          bboxi <- str_which(tempextra$value, bbox_reg)
+          latlongl <- unlist(str_extract_all(unlist(tempextra$value[bboxi]),"[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}[\\s]?,?[\\s]?[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16}"))
+        } else {
+          # If we do not see first pattern, resort to searching for: 
+          # -###.######,##.######
+          bbox_reg2 <- regex("[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}[\\s]?,?[\\s]?[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16}",ignore_case = TRUE)
+          bboxscan2 <- str_detect(tempextra$value, bbox_reg2)
+          if (sum(bboxscan2) > 0 ){
+            latlongs <- TRUE
+            arcmins <- FALSE
+            bboxi <- str_which(tempextra$value, bbox_reg2)
+            latlongl <- unlist(str_extract_all(unlist(tempextra$value[bboxi]),"[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}[\\s]?,?[\\s]?[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16}"))
+          } else {
+            # Else we do not see coordinate pairs
+            # -###.######,##.######
+            # Last stop is looking for arc-min style coordinates, like:
+            # 123° 13' 37" N , 45° 14' 37" W
+            # 96° 15' 57" N , 67° 16' 57" W
+            # bbox_reg4 <- regex("(?:\\d+[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]){1,3}.+(N|S|E|W|north|south|east|west)", ignore_case = TRUE)
+            bbox_reg3 <- regex("(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)(\\.\\d+)?(\\u00B0)*?[\\s]?,?[\\s]?\\d+(\\.\\d+)?(\\'|\\p{quotation mark}|.)*?[\\s]?,?[\\s]?\\d+(\\.\\d+)?(\"|\\p{quotation mark})[\\s]?(N|north|S|south|E|east|W|west)",ignore_case = TRUE)
+            bboxscan3 <- str_detect(tempextra$value, bbox_reg3)
+            if (sum(bboxscan3) > 0 ){
+              bboxi <- str_which(tempextra$value, bbox_reg3)
+              latlongl <- unlist(str_extract_all(str_replace_all(unlist(tempextra$value[bboxi]),"\\p{quotation mark}","'"),bbox_reg3))
+              latlongs <- TRUE
+              arcmins <- TRUE
+            } else {
+              latlongs <- FALSE
+              arcmins <- FALSE
+            }
+          }
+        }
+        
+        if (latlongs){
+          if (!arcmins){
+            num_coords <- as.integer(length(latlongl))
+            # break apart results into lats and longs by using lats first 0-90:
+            lats1 <- as.double(str_extract(latlongl, "(?<=[-]?\\d{1,3}\\.\\d{0,16}[\\s]?,?[\\s]?)[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d+"))
+            lats2 <- as.double(str_extract(latlongl, "[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d+(?=[\\s]?,?[\\s]?[-]?\\d{1,3}\\.\\d{0,16})"))
+            longs1 <- as.double(str_extract(latlongl, "[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}(?=[\\s]?,?[\\s]?[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16})"))
+            longs2 <- as.double(str_extract(latlongl, "(?<=[-]?(?<!\\d)(0?[0-9]|[1-8][0-9]|90)\\.\\d{0,16}[\\s]?,?[\\s]?)[-]?(0{0,2}[0-9]|0?[0-9][0-9]|1[0-7][0-9]|180)\\.\\d{0,16}"))
+            if (sum(is.na(lats1)) <= num_coords) {
+              lats <- lats1[!is.na(lats1)]
+              longs <- longs1[!is.na(longs1)]
+            } else if (sum(is.na(lats2)) <= num_coords){
+              lats <- lats2[!is.na(lats2)]
+              longs <- longs2[!is.na(longs2)]
+            } else {
+              # Rarely but if we have longs = 2 digits like lats, we'll exceed
+              # the number of coordinate pairs. In this instance, we'll have to
+              # assume that the first coordinate is longitude and the second is
+              # latitude
+              lats <- lats1[!is.na(lats1)]
+              longs <- longs1[!is.na(longs1)]
+            }
+            
+            bbox_e <- max(longs)
+            bbox_n <- max(lats)
+            bbox_s <- min(lats)
+            bbox_w <- min(longs)
+           
+          } else {
+            # If we have arc-min style coordinates, like:
+            # 123° 13' 37" N , 45° 14' 37" W
+            # 96° 15' 57" N , 67° 16' 57" W
+            # arcminex <- c("123.456° 78.90' 11.12\" N , 67.89° 10.11' 12.13\" West", "96.543° 15.432' 57.654\" S , 67.654° 16.543' 57.654\" E")
+            
+            # Then just assign the first part of the measurement to its
+            # respective lat/long variable:
+            # arcmin_lat <- regex("(0?[0-9]|[1-8][0-9]|90)(?=(\\u00B0|\\.)*?[\\s]?,?[\\s]?\\d+(\\'|\\p{quotation mark}|.)*?[\\s]?,?[\\s]?\\d+(\"|\\p{quotation mark})[\\s]?(N|S|north|south))")
+            # arcmin_lon <- regex("(?:(0?0?[0-9])|(0?[1-9][0-9])|(1[0-7][0-9])|180)(?=(\\u00B0|\\.)*?[\\s]?,?[\\s]?\\d+(\\'|\\p{quotation mark}|.)*?[\\s]?,?[\\s]?\\d+(\"|\\p{quotation mark})[\\s]?(E|W|east|west))")
+            arcmin_lat <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(N|S|north|south))", ignore_case = TRUE)
+            arcmin_lon <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(E|W|east|west))", ignore_case = TRUE)
+            ntester <- regex("(?<=\\d{1,3}[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]{0,16})(N|north)", ignore_case = TRUE)
+            stester <- regex("(?<=\\d{1,3}[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]{0,16})(S|south)", ignore_case = TRUE)
+            etester <- regex("(?<=\\d{1,3}[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]{0,16})(E|east)", ignore_case = TRUE)
+            wtester <- regex("(?<=\\d{1,3}[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]{0,16})(W|west)", ignore_case = TRUE)
+            arcmin_lat_n <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(N|north))", ignore_case = TRUE)
+            arcmin_lat_s <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(S|south))", ignore_case = TRUE)
+            arcmin_lon_e <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(E|east))", ignore_case = TRUE)
+            arcmin_lon_w <- regex("\\d+(?=[\\u00B0\\.\\s,\\d\\'\\p{quotation mark}\"]+(W|west))", ignore_case = TRUE)
+            lats <- as.integer(str_replace_na(str_extract(latlongl,arcmin_lat),"0"))
+            longs <- as.integer(str_replace_na(str_extract(latlongl,arcmin_lon),"0"))
+            num_n <- sum(str_detect(latlongl,ntester))
+            num_s <- sum(str_detect(latlongl,stester))
+            num_e <- sum(str_detect(latlongl,etester))
+            num_w <- sum(str_detect(latlongl,wtester))
+            if ( num_s == 0 ){
+              # We only have N coordinates
+              if ( num_e == 0 ){
+                # N and W coordinates only, use min and max to find bounds:
+                bbox_e <- max(longs)
+                bbox_n <- max(lats)
+                bbox_s <- min(lats)
+                bbox_w <- min(longs)
+              } else {
+                # N with E and W coordinates, use min-max and max of matches:
+                bbox_e <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lon_e),"0")))
+                bbox_n <- max(lats)
+                bbox_s <- min(lats)
+                bbox_w <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lon_w),"0")))
+              }
+            } else {
+              # We have both N and S coordinates:
+              if ( num_e == 0 ){
+                # N and S paired with only W, use min-max and max of matches:
+                bbox_e <- max(longs)
+                bbox_n <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lat_n),"0")))
+                bbox_s <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lat_s),"0")))
+                bbox_w <- min(longs)
+              } else {
+                # We have all 4 coordinates: N, S, E, and W.
+                # Use max of the matches to find boundaries:
+                bbox_e <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lon_e),"0")))
+                bbox_n <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lat_n),"0")))
+                bbox_s <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lat_s),"0")))
+                bbox_w <- max(as.integer(str_replace_na(str_extract(latlongl,arcmin_lon_w),"0")))
+              }
+            }
+            
+            
+          } # end of else for arc-min coordinating handling for bbox
+          
+          
+        } else {
+          # anything else to try and recover lats and longs?
+        }
+        
+      } # end of lat-long recovery chain
+      
+      
+      bboxarray <- c(bbox_e, bbox_n, bbox_s, bbox_w)
+      bbox_empty <- as.logical(str_replace_na(str_detect(bboxarray,blanktester),"TRUE"))
+      
+      
+      if (sum(bbox_empty) > 0){
+        api_results$Bbox_east_long[x] <- as.integer(bboxarray[!bbox_empty][1])
+        api_results$Bbox_north_lat[x] <- as.integer(bbox_n)
+        api_results$Bbox_south_lat[x] <- as.integer(bbox_s)
+        api_results$Bbox_west_long[x] <- as.integer(bbox_w)
+        
+      } else {
+        # Bboxes all found, write results as normal to the api_results columns:
+        api_results$Bbox_east_long[x] <- bbox_e
+        api_results$Bbox_north_lat[x] <- bbox_n
+        api_results$Bbox_south_lat[x] <- bbox_s
+        api_results$Bbox_west_long[x] <- bbox_w
+      }
+      
+      bboxqc <- as.integer(0)
+      
+      # Perform QC on the values:
+      
+      if (sum(bbox_empty) >= 1) {
+        # If we have a missing bounding box value, no credit for having
+        # all 4 sides:
+        bboxqc <- 4 - sum(str_detect(bboxarray, blanknullna_tester))
+        api_qcresults$`Bbox-Exists-x4`[x] <- FALSE
+      } else {
+        bboxqc <- bboxqc + 4
+        api_qcresults$`Bbox-Exists-x4`[x] <- TRUE
+      }
+      bbox_e <- if(str_detect(bbox_e,blanktester)){181} else {bbox_e}
+      bbox_n <- if(str_detect(bbox_n,blanktester)){91} else {bbox_n}
+      bbox_s <- if(str_detect(bbox_s,blanktester)){91} else {bbox_s}
+      bbox_w <- if(str_detect(bbox_w,blanktester)){181} else {bbox_w}
+      # East bounding box within bounds?
+      if (bbox_e >= long_min && bbox_e <= long_max) {
+        bboxqc <- bboxqc + 1
+        api_qcresults$`Bbox_east_long-withinBounds`[x] <- TRUE
+      } else {
+        api_qcresults$`Bbox_east_long-withinBounds`[x] <- FALSE
+      }
+      # North bounding box within bounds?
+      if (bbox_n >= lat_min && bbox_n <= lat_max) {
+        bboxqc <- bboxqc + 1
+        api_qcresults$`Bbox_north_lat-withinBounds`[x] <- TRUE
+      } else {
+        api_qcresults$`Bbox_north_lat-withinBounds`[x] <- FALSE
+      }
+      # South bounding box within bounds?
+      if (bbox_s >= lat_min && bbox_s <= lat_max) {
+        bboxqc <- bboxqc + 1
+        api_qcresults$`Bbox_south_lat-withinBounds`[x] <- TRUE
+      } else {
+        api_qcresults$`Bbox_south_lat-withinBounds`[x] <- FALSE
+      }
+      # West bounding box within bounds?
+      if (bbox_w >= long_min && bbox_w <= long_max) {
+        bboxqc <- bboxqc + 1
+        api_qcresults$`Bbox_west_long-withinBounds`[x] <- TRUE
+      } else {
+        api_qcresults$`Bbox_west_long-withinBounds`[x] <- FALSE
+      }
+      # Test if the bounding box elements make a box
+      if (bbox_e > bbox_w) {
+        # E bigger than W, + 1 bonus point
+        bboxqc <- bboxqc + 1
+      } else if (bbox_w > bbox_e) {
+        # Sometimes W is bigger than E
+        bboxqc <- bboxqc + 1
+      } else if (bbox_e != bbox_w) {
+        # At least the two values should not be equal:
+        bboxqc <- bboxqc + 1
+      }
+      if (bbox_n > bbox_s) {
+        # and N bigger than S
+        # + 1 bonus point
+        bboxqc <- bboxqc + 1
+      } else if (bbox_s != bbox_n) {
+        # At least the two values should not be equal:
+        bboxqc <- bboxqc + 1
+      }
+      # Max score for bboxqc is 10:
+      # 1: +4 points if all 4 sides, less 1 point per side missing (+4)
+      # 2: +1 point per each side of the box if are normal lat/long (+4; 8)
+      # 3: +2 "bonus" points if the box is a box E>W (+1) && N>S (+1) (+2; 10)
+      api_qcresults$`Bbox-Score`[x] <- bboxqc
+      # .....................Resources For Loop & QC..........................
+      if (resourcecount > 0) {
+        w <- 0
+        # Only check when Resources DF has actual data:
+        dlmulticount <- 0
+        wmsmulticount <- 0
+        wmsmultiurl <- 0
+        wmsmultiname <- 0
+        wmsmultidesc <- 0
+        mdoglinks <- 0
+        
+        zipwhere <- str_which(apiresources$format, zip_regex)
+        ziptestwhere2 <- str_which(apiresources$url, scanzip)
+        dwnlddatawhere <- str_which(apiresources$description, downloadd)
+        datadwnldwhere <- str_which(apiresources$description, ddownload)
+        todownloadwhere <- str_which(apiresources$description, todownload)
+        numdls <- sum(
+          zipwhere, ziptestwhere2, dwnlddatawhere, datadwnldwhere,
+          todownloadwhere
+        )
+        
+        # dlarray <- abind(zipwhere,ziptestwhere2,dwnlddatawhere,datadwnldwhere)
+        # dltab <- data.table::as.data.table(dlarray)
+        # if (anyDuplicated(dltab)>0){
+        #   dltab <- dltab[duplicated(dltab)]
+        # }
+        # ddllastloc <- str_which(apiresources$resource_locator_function,rlf_dwnld)
+        # dlcount <- str_count(apiresources$resource_locator_function,rlf_dwnld)
+        wmswhere <- str_which(apiresources$format, scanwms)
+        restwhere <- str_which(apiresources$format, scanerest)
+        wmstestwhere2 <- str_which(apiresources$description, wmswords)
+        numwms <- sum(wmswhere, restwhere, wmstestwhere2)
+        # wmsarray <- abind(wmswhere,restwhere,wmstestwhere2)
+        # wmstab <- data.table::as.data.table(wmsarray)
+        # if (anyDuplicated(wmstab)){
+        #   wmstab <- duplicated(wmstab)
+        # }
+        
+        # .........................MD-Origin-Link.............................
+        # Name field for both seems to be "Full Metadata Record"
+        #
+        mdgflag <- FALSE
+        mgoglinks <- sum(str_detect(apiresources$name, "Full Metada Record"))
+        if (mdoglinks == 1) {
+          mdgflag <- TRUE
+          api_MDfiles$MD_OriginLink[x] <- apiresources$url[str_which("Full Metadata Record")]
+        } else if (mdoglinks > 1) {
+          mdgflag <- TRUE
+          api_MDfiles$MD_OriginLink[x] <- glue_collapse(apiresources$url[str_which("Full Metadata Record")], sep = "|")
+        }
+        if (!mdgflag) {
+          if (str_detect(bname, "Census")) {
+            origmdlinktest <- sum(str_detect(apiresources$format, "XML"))
+            if (origmdlinktest > 0) {
+              origmdloc <- str_which(apiresources$format, "XML")
+              api_MDfiles$MD_OriginLink[x] <- apiresources$url[origmdloc]
+            } else {
+              # Link repair since MD file link not included:
+              if (mdidfr_y) {
+                censusxml <- paste0(
+                  "https://meta.geo.census.gov/data/existing/",
+                  " looking for: ", mdidfr
+                )
+              } else {
+                # No MD identifier
+                api_MDfiles$MD_OriginLink[x] <- blankify
+                if (citidfr_y) {
+                  censuswaf <- paste0("https://www2.census.gov/geo/tiger/")
+                  censusdata <- paste0(
+                    "https://www2.census.gov/geo/tiger/",
+                    " looking for: ", citidfr, ".zip"
+                  )
+                  censusxml <- paste0(
+                    "https://meta.geo.census.gov/data/existing/",
+                    " looking for: ", mdidfr
+                  )
+                  # api_MDfiles$MD_OriginLink[x] <- censusxml
+                  api_MDfiles$MD_OriginPage[x] <- censuswaf
+                  api_MDfiles$MD_OriginLink2[x] <- censusdata
+                }
+              }
+            }
+          } else if (str_detect(bname, "NOAA")) {
+            # NOAA MD Link detection / repair:
+            # Other NOAA link reconstructions go here
+            # using:
+            # fisheriesscan
+            # nceiscan1
+            # nceiscan2
+            # datanoaascan
+            # isurl_regex
+            fdmdlink <- FALSE
+            # Multiply by 4 since we do 4 tests times the num-resources
+            mdlink <- vector(mode = "integer", length = 1)
+            # Test/combine all 4 into single array:
+            mdlink1 <- which(str_detect(apiresources$url, fisheriesscan))
+            mdlink2 <- which(str_detect(apiresources$url, nceiscan1))
+            mdlink3 <- which(str_detect(apiresources$url, nceiscan2))
+            mdlink4 <- which(str_detect(apiresources$url, datanoaascan))
+            mdlink <- c(mdlink1, mdlink2, mdlink3, mdlink4)
+            if (is_empty(mdlink)) {
+              fdmdlink <- FALSE
+            } else {
+              fdmdlink <- TRUE
+            }
+            if (fdmdlink) {
+              api_MDfiles$MD_OriginLink[x] <- apiresources$url[mdlink]
+              api_MDfiles$MD_OriginPage[x] <- blankify
+              api_MDfiles$MD_OriginLink2[x] <- blankify
+            } else if (!fdmdlink) {
+              if (citidfr_y && mdidfr_y) {
+                if (str_detect(mdidfr, fisheriestester)) {
+                  api_MDfiles$MD_OriginLink[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/iso19115")
+                  api_MDfiles$MD_OriginPage[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr)
+                  api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/full-list")
+                } else if (length(citidfr) != length(mdidfr)) {
+                  api_MDfiles$MD_OriginLink[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr, ";view=xml;responseType=text/xml")
+                  api_MDfiles$MD_OriginPage[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr)
+                  api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.ncei.noaa.gov/metadata/geoportal/rest/metadata/item/", mdidfr, "/xml")
+                } else if (str_detect(citidfr, ncitid)) {
+                  api_MDfiles$MD_OriginPage[x] <- paste0("https://data.noaa.gov/onestop/details/", mdidfr, "/xml")
+                  api_MDfiles$MD_OriginLink[x] <- paste0("https://data.noaa.gov/onestop/collections?q=", mdidfr)
+                  api_MDfiles$MD_OriginLink2[x] <- blankify
+                  # https://github.com/cedardevs/onestop/blob/master/registry/src/main/java/org/cedar/onestop/registry/util/UUIDValidator.java
+                  # uuid_regex = regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",ignore_case = FALSE,comments = TRUE)
+                } else {
+                  # Other NOAA link reconstructions could go here
+                }
+              } # Absent a metadata identifier steps?
+            }
+          } else {
+            # Other bureau checks
+          }
+        }
+        # ..................Download and WMS Scan-Link......................
+        if ((numdls > 0) || (numwms > 0)) {
+          for (w in 1:resourcecount) {
+            dlqcscore <- 0
+            wmsflag <- FALSE
+            wmsqcscore <- 0
+            ziptest <- str_detect(apiresources$format[w], zip_regex)
+            ziptest2 <- str_detect(apiresources$url[w], scanzip)
+            dwnlddata <- str_detect(apiresources$description[w], downloadd)
+            datadwnld <- str_detect(apiresources$description[w], ddownload)
+            todwnld <- str_detect(apiresources$description[w], todownload)
+            wmstest <- str_detect(apiresources$format[w], scanwms)
+            resttest <- str_detect(apiresources$format[w], scanerest)
+            wmstest2 <- str_detect(apiresources$description[w], wmswords)
+            wmstest3 <- str_detect(apiresources$url[w],wmsregex)
+            # ....................D-Download_URL-Exists QC....................
+            if (ziptest) {
+              dlmulticount <- dlmulticount + 1
+              dlqcscore <- dlqcscore + 1
+            } else if (ziptest2) {
+              dlmulticount <- dlmulticount + 1
+              dlqcscore <- dlqcscore + 1
+            } else if (dwnlddata) {
+              dlmulticount <- dlmulticount + 1
+              dlqcscore <- dlqcscore + 1
+            } else if (datadwnld) {
+              dlmulticount <- dlmulticount + 1
+              dlqcscore <- dlqcscore + 1
+            } else if (todwnld) {
+              dlmulticount <- dlmulticount + 1
+              dlqcscore <- dlqcscore + 1
+            } else {
+              # Will trigger if the previous tests fail to find a "download"
+              # Do nothing, continue looping
+            }
+            if (dlqcscore == 1) {
+              # Only write out if we have a match for this current w:
+              if (w == 1){
+                api_results$`Download URL`[x] <- paste0(apiresources$url[w])
+              } else if (w > 1 && w < resourcecount){
+                api_results$`Download URL`[x] <- glue_collapse(c(api_results$`Download URL`[x], apiresources$url[w]), sep = "|")
+              } else if (w == resourcecount){
+                if (dlmulticount > 1) {
+                  api_results$`Download URL`[x] <- glue_collapse(c(paste0(dlmulticount," links"),api_results$`Download URL`[x], apiresources$url[w]), sep = "|")
+                } else {
+                  api_results$`Download URL`[x] <- glue_collapse(c(paste0(dlmulticount," link"),api_results$`Download URL`[x], apiresources$url[w]), sep = "|")
+                }
+              } else {
+                api_results$`Download URL`[x] <- glue_collapse(c(api_results$`Download URL`[x], apiresources$url[w]), sep = "|")
+              }
+              api_qcresults$`D-DownloadURL-Score`[x] <- 1
+              api_qcresults$`D-Download_URL-Exists` <- TRUE
+            } else {
+              # Do nothing this loop
+              # If they have at least 1 DL in resources find-able by the above
+              # conditions and expressions, they will get 1 point
+            }
+            dlqcscore <- 0
+            
+            # ....................Web_Service_URL-Exists QC.....................
+            if (wmstest) {
+              wmsflag <- TRUE
+            } else if (resttest) {
+              wmsflag <- TRUE
+            } else if (wmstest2) {
+              wmsflag <- TRUE
+            } else if (wmstest3) {
+              wmsflag <- TRUE
+            } else {
+              # Area for expanding the WMS testing protocols
+              # ex: change the above to a else if and append an additional
+              # else
+              wmsflag <- FALSE
+            }
+            if (wmsflag) {
+              wmsmulticount <- wmsmulticount + 1
+              # String cleaning the WMS URL:
+              wmsurl <- str_trim(apiresources$url[w])
+              wmsurl <- str_replace_na(wmsurl, "NA")
+              wmsurl <- str_replace_all(wmsurl,"\\n$",blankify)
+              wmsurl <- str_trim(str_replace_all(wmsurl,"\\s+"," "))
+              # String cleaning the WMS description:
+              wmsdesc <- str_trim(apiresources$description[w])
+              wmsdesc <- str_replace_na(wmsdesc, "NA")
+              wmsdesc <- str_replace_all(wmsdesc,"\\n$",blankify)
+              wmsdesc <- str_trim(str_replace_all(wmsdesc,"\\s+"," "))
+              # String cleaning the WMS name:
+              wmsname <- str_trim(apiresources$name[w])
+              wmsname <- str_replace_na(wmsname, "NA")
+              wmsname <- str_replace_all(wmsname,"\\n$",blankify)
+              wmsname <- str_trim(str_replace_all(wmsname,"\\s+"," "))
+              
+              # WMS QC:
+              # Though more reliable at time of uptake to check URL validity,
+              # using a function like:
+              # (!http_error(wmsurl)) , which evaluates to TRUE if URL valid
+              # will SIGNIFICANTLY impact code performance and make data uptake
+              # from the API far too time-intensive / lengthy.
+              
+              # The QC repair for this is to scan back through all URLs, once
+              # collected, and run this URL validation test and, upon failing,
+              # dock or otherwise annotate the quality score, if desired.
+              
+              # DOC-OIG is assuming that Datat.gov CKAN software has checks
+              # in place to only allow "valid" URLs.
+              # Instead, we look at the url and see if it "looks" like a URL.
+              # If TRUE, then we're satisfied for the purposes of data uptake.
+              if (str_detect(wmsurl, isurl_regex)) {
+                # isurl_regex test #1
+                # if URL looks like a URL, good enough:
+                api_qcresults$`Web_Service_URL-Exists`[x] <- TRUE
+                wmsqcscore <- wmsqcscore + 1
+                wmsmultiurl <- wmsmultiurl + 1
+              } else {
+                # URL does not look like a URL, fail:
+                if (api_qcresults$`Web_Service_URL-Exists`[x]){
+                } else {
+                  api_qcresults$`Web_Service_URL-Exists`[x] <- FALSE
+                }
+                wmsqcscore <- wmsqcscore - 1
+              }
+              if (str_detect(wmsname, isurl_regex)) {
+                # isurl_regex test #2
+                # Do not want names that look like URLs
+                api_qcresults$`Web_Service_Name-Exists`[x] <- FALSE
+                wmsqcscore <- wmsqcscore - 1
+              } else if (str_detect(wmsname,anythingtester)){
+                # Anything other than URL is good enough:
+                api_qcresults$`Web_Service_Name-Exists`[x] <- TRUE
+                wmsqcscore <- wmsqcscore + 1
+                wmsmultiname <- wmsmultiname + 1
+              }
+              if (str_detect(wmsdesc, anythingtester)) {
+                # Anything other than a blank/null will pass:
+                api_qcresults$`Web_Service_Description-Exists`[x] <- TRUE
+                wmsqcscore <- wmsqcscore + 1
+              } else if (str_detect(wmsdesc, blanknullna_tester)) {
+                # Confirm that WMS description is blank, fail:
+                api_qcresults$`Web_Service_Description-Exists`[x] <- FALSE
+                wmsqcscore <- wmsqcscore - 1
+              } else {
+                # Should never trigger but in case there is a 3rd condition
+                # Other than "anything" vs. "blank"
+              }
+              # Now, test the aggregate WMS QC score to see if we hit threshold:
+              if (wmsqcscore >= 3) {
+                # ISO requires all 3 elements for WMS:
+                # (1)-WMS URL
+                # (2)-WMS Name
+                # (3)-WMS Description
+                # The scoring criteria we use above assigns + 1 point for each
+                # element of the WMS. Therefore, only WMS with all 3 elements
+                # will pass.
+                # The only additional restriction over ISO we place here is
+                # that the WMS name cannot be in the form of a URL
+                # (see isurl_regex test #2 above)
+                #
+                # If we meet ISO, add one success to the QC table
+                api_qcresults$`Web_Service-Score`[x] <-
+                  api_qcresults$`Web_Service-Score`[x] + 1
+                # Reset the WMS QC score variable (so it can go up to 3 again)
+                wmsqcscore <- 0
+              } else {
+                # We did not have all 3 elements, add nothing to the score
+                api_qcresults$`Web_Service-Score`[x] <-
+                  api_qcresults$`Web_Service-Score`[x] + 0
+                # Reset the WMS QC score variable (so it can go up to 3 again)
+                wmsqcscore <- 0
+              }
+              # Only write out if we have a match for WMS at this current w:
+              if (w == 1){
+                api_results$`Web Service URL`[x] <- paste0(wmsurl)
+                api_results$`Web Service description`[x] <- paste0(wmsdesc)
+                api_results$`Web Service Name`[x] <- paste0(wmsname)
+              } else if (w > 1 && w < resourcecount){
+                api_results$`Web Service URL`[x] <- glue_collapse(c(api_results$`Web Service URL`[x], paste0(wmsurl), sep = "|"))
+                api_results$`Web Service description`[x] <- glue_collapse(c(api_results$`Web Service description`[x], paste0(wmsdesc), sep = "|"))
+                api_results$`Web Service Name`[x] <- glue_collapse(c(api_results$`Web Service Name`[x], paste0(wmsname), sep = "|"))
+              } else if (w == resourcecount){
+                # WMS multiple URLs
+                if (wmsmultiurl > 1) {
+                  api_results$`Web Service URL`[x] <- glue_collapse(c(paste0(wmsmultiurl," WMS links"),api_results$`Web Service URL`[x], paste0(wmsurl), sep = "|"))
+                } else if (wmsmultiurl == 1){
+                  api_results$`Web Service URL`[x] <- glue_collapse(c(paste0(wmsmultiurl," WMS link"),api_results$`Web Service URL`[x], paste0(wmsurl), sep = "|"))
+                } else {
+                  api_results$`Web Service URL`[x] <- glue_collapse(c(paste0("No WMS WMS URLs"),api_results$`Download URL`[x], sep = "|"))
+                }
+                # WMS multiple descriptions
+                if (wmsmultidesc > 1) {
+                  api_results$`Web Service description`[x] <- glue_collapse(c(paste0(wmsmultidesc," WMS descriptions"),api_results$`Web Service description`[x], paste0(wmsdesc), sep = "|"))
+                } else if (wmsmultidesc == 1){
+                  api_results$`Web Service description`[x] <- glue_collapse(c(paste0(wmsmultidesc," WMS descriptions"),api_results$`Web Service description`[x], paste0(wmsdesc), sep = "|"))
+                } else {
+                  api_results$`Web Service description`[x] <- glue_collapse(c(paste0("No WMS descriptions"),api_results$`Web Service description`[x], sep = "|"))
+                }
+                # WMS multiple names
+                if (wmsmultiname > 1) {
+                  api_results$`Web Service Name`[x] <- glue_collapse(c(paste0(wmsmultiname," WMS names"),api_results$`Web Service Name`[x], paste0(wmsname), sep = "|"))
+                } else if (wmsmultiname == 1){
+                  api_results$`Web Service Name`[x] <- glue_collapse(c(paste0(wmsmultiname," WMS names"),api_results$`Web Service Name`[x], paste0(wmsname), sep = "|"))
+                } else {
+                  api_results$`Web Service Name`[x] <- glue_collapse(c(paste0("No WMS names"),api_results$`Web Service Name`[x], sep = "|"))
+                }
+              } else {
+                api_results$`Web Service URL`[x] <- glue_collapse(c(api_results$`Web Service URL`[x], apiresources$url[w]), sep = "|")
+                api_results$`Web Service description`[x] <- glue_collapse(c(paste0("No WMS descriptions"),api_results$`Web Service description`[x], sep = "|"))
+                api_results$`Web Service Name`[x] <- glue_collapse(c(paste0("No WMS names"),api_results$`Web Service Name`[x], sep = "|"))
+              }
+            }
+            wmsflag <- FALSE
+          } # for loop at level "w" (resourcecount loop)
+        } else {
+          # We do not detect any Downloads or WMS in the resources data block
+          # Set results:
+          # ......................Zero DL or WMS QC...........................
+          api_results$`Download URL`[x] <- blankify
+          api_results$`Web Service URL`[x] <- blankify
+          api_results$`Web Service description`[x] <- blankify
+          api_results$`Web Service Name`[x] <- blankify
+          api_qcresults$`D-Download_URL-Exists`[x] <- FALSE
+          api_qcresults$`D-DownloadURL-Score`[x] <- 0
+          api_qcresults$`Web_Service_URL-Exists`[x] <- FALSE
+          api_qcresults$`Web_Service_Description-Exists`[x] <- FALSE
+          api_qcresults$`Web_Service_Name-Exists` <- FALSE
+          api_qcresults$`Web_Service-Score`[x] <- 0
+          # .....................MD Origin Link Repair..........................
+          # Attempt to re-create the origin links despite zero DL or WMS link:
+          if (str_detect(bname, "Census")) {
+            if (citidfr_y && mdidfr_y) {
+              censuswaf <- paste0("https://www2.census.gov/geo/tiger/")
+              censusdata <- paste0(
+                "https://www2.census.gov/geo/tiger/",
+                " looking for: ", citidfr, ".zip"
+              )
+              censusxml <- paste0(
+                "https://meta.geo.census.gov/data/existing/",
+                " looking for: ", mdidfr
+              )
+              api_MDfiles$MD_OriginLink[x] <- censusxml
+              api_MDfiles$MD_OriginPage[x] <- censuswaf
+              api_MDfiles$MD_OriginLink2[x] <- censusdata
+            }
+          } else if (str_detect(bname, "NOAA")) {
+            if (citidfr_y && mdidfr_y) {
+              if (str_detect(mdidfr, fisheriestester)) {
+                api_MDfiles$MD_OriginLink[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/iso19115")
+                api_MDfiles$MD_OriginPage[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr)
+                api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/full-list")
+              } else if (length(citidfr) != length(mdidfr)) {
+                api_MDfiles$MD_OriginLink[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr, ";view=xml;responseType=text/xml")
+                api_MDfiles$MD_OriginPage[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr)
+                api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.ncei.noaa.gov/metadata/geoportal/rest/metadata/item/", mdidfr, "/xml")
+              } else if (str_detect(citidfr, ncitid)) {
+                api_MDfiles$MD_OriginPage[x] <- paste0("https://data.noaa.gov/onestop/collections?q=", mdidfr, "/xml")
+                api_MDfiles$MD_OriginLink[x] <- blankify
+                api_MDfiles$MD_OriginLink2[x] <- blankify
+              } else {
+                # Other NOAA link reconstructions go here
+              }
+            }
+          } else {
+            # Other bureaus go here
+          }
+        }
+      } else { # Resources DF empty, set results:
+        # .......................Zero Resources QC............................
+        api_results$`Download URL`[x] <- blankify
+        api_results$`Web Service URL`[x] <- blankify
+        api_results$`Web Service description`[x] <- blankify
+        api_results$`Web Service Name`[x] <- blankify
+        api_qcresults$`D-Download_URL-Exists`[x] <- FALSE
+        api_qcresults$`D-DownloadURL-Score`[x] <- 0
+        api_qcresults$`Web_Service_URL-Exists`[x] <- FALSE
+        api_qcresults$`Web_Service_Description-Exists`[x] <- FALSE
+        api_qcresults$`Web_Service_Name-Exists` <- FALSE
+        api_qcresults$`Web_Service-Score`[x] <- 0
+        
+        # .....................MD Origin Link Repair..........................
+        # Attempt to re-create the origin links despite zero resources:
+        if (str_detect(bname, "Census")) {
+          if (api_qcresults$`MetadataID-Exists`[x] == TRUE) {
+            censuswaf <- paste0("https://www2.census.gov/geo/tiger/")
+            censusdata <- paste0(
+              "https://www2.census.gov/geo/tiger/",
+              " looking for: ", citidfr, ".zip"
+            )
+            censusxml <- paste0(
+              "https://meta.geo.census.gov/data/existing/",
+              " looking for: ", mdidfr
+            )
+            api_MDfiles$MD_OriginLink[x] <- censusxml
+            api_MDfiles$MD_OriginPage[x] <- censuswaf
+            api_MDfiles$MD_OriginLink2[x] <- censusdata
+          }
+        } else if (str_detect(bname, "NOAA")) {
+          if (citidfr_y && mdidfr_y) {
+            if (str_detect(mdidfr, fisheriestester)) {
+              api_MDfiles$MD_OriginLink[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/iso19115")
+              api_MDfiles$MD_OriginPage[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr)
+              api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.fisheries.noaa.gov/inport/item/", citidfr, "/full-list")
+            } else if (length(citidfr) != length(mdidfr)) {
+              api_MDfiles$MD_OriginLink[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr, ";view=xml;responseType=text/xml")
+              api_MDfiles$MD_OriginPage[x] <- paste0("https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=", mdidfr)
+              api_MDfiles$MD_OriginLink2[x] <- paste0("https://www.ncei.noaa.gov/metadata/geoportal/rest/metadata/item/", mdidfr, "/xml")
+            } else if (str_detect(citidfr, ncitid)) {
+              api_MDfiles$MD_OriginPage[x] <- paste0("https://data.noaa.gov/onestop/collections?q=", mdidfr, "/xml")
+              api_MDfiles$MD_OriginLink[x] <- blankify
+              api_MDfiles$MD_OriginLink2[x] <- blankify
+            } else {
+              # Other NOAA link reconstructions go here
+            }
+          }
+        } else {
+          # Other bureaus go here
+        }
+      } # End Resource checks and optional MD origin link repair(s)
+      api_qcresults$`QC-Score`[x] <- api_qcresults$`Title-Score`[x] + api_qcresults$`Abstract-Score`[x] + api_qcresults$`Bbox-Score`[x] + api_qcresults$`RefSysID-Score`[x] + api_qcresults$`RespParty-Score`[x] + api_qcresults$`CitationID-Score`[x] + api_qcresults$`MetadataID-Score`[x] + api_qcresults$`D-TEEnd-QC-Score`[x] + api_qcresults$`D-TEBegin-QC-Score`[x] + api_qcresults$`Web_Service-Score`[x] + api_qcresults$`Keywords-Score`[x] + api_qcresults$`ProgressCode-Score`[x] + api_qcresults$`FreqofUpdate-Score`[x] + api_qcresults$`D-PubDate-QC-Score`[x] + api_qcresults$`D-CreateDate-QC-Score`[x] + api_qcresults$`D-LUpDate-QC-Score`[x] + api_qcresults$`MD-PubDate-QC-Score`[x] + api_qcresults$`MD-LUpDate-QC-Score`[x] + api_qcresults$`D-DownloadURL-Score`[x] + api_qcresults$`MD-DownloadURL-Score`[x]
+    } # for loop at level "j" to next record (per record iterator within batch)
+    # rm(apiquery, apipull, api_res, api_extras, apiresources)
+    gc()
+  } # for loop at level "k" (1 to number of batches; batch iterator within agency)
+} # for loop at level "b" (per agency iterator)
+# End: API Read-in--------------------------------------------------------------
+rm(list = setdiff(ls(),min_vars))
+gc()
+# Begin: QC Checks, Results Write-Out-------------------------------------------
+# NGDA Check:-------------------------------------------------------------------
+docngdacount <- dim(ngdalist)[[1]]
+doc_ngda <- api_results %>% filter(`NGDAID` > 0)
+doc_ngdal <- length(doc_ngda$NGDAID)
+ngdal <- length(ngdalist$NGDAID)
+if (ngdal > doc_ngdal){
+  ngdamissing <- setdiff(ngdalist$NGDAID,doc_ngda$NGDAID)
+  ngdacountmsg <- paste0("Found ",doc_ngdal," of ",docngdacount," NGDA datasets. Missing NGDAID#(s): ",glue_collapse(ngdamissing,sep = ","))
+  print(ngdacountmsg)
+} else if (ngdal==doc_ngdal) {
+  ngdacountmsg <- paste0("Found all ",doc_ngdal,"/",docngdacount," NGDA datasets.")
+  print(ngdacountmsg)
+} else {
+  toomanyngda <- setdiff(doc_ngda$NGDAID,ngdalist$NGDAID)
+  ngdacountmsg <- paste0("Found ",doc_ngdal," of ",docngdacount," NGDA datasets. Overage by NGDAID#(s): ",glue_collapse(toomanyngda,sep = ","))
+  print(ngdacountmsg)
+}
+
+# Stop here
+# NGDA and Non-NGDA Data Organization:------------------------------------------
+# NGDA Summaries:
+noaa_ngdar <- api_results %>% filter(`NGDAID` > 0 & `AgencyBureau`=="NOAA")
+noaa_ngdaqc <- api_qcresults %>% filter(`NGDAID` > 0 & `AgencyBureau`=="NOAA")
+noaa_ngdamd <- api_MDfiles %>% filter(`NGDAID` > 0 & `AgencyBureau`=="NOAA")
+census_ngdar <- api_results %>% filter(`NGDAID` > 0 & `AgencyBureau`=="Census")
+census_ngdaqc <- api_qcresults %>% filter(`NGDAID` > 0 & `AgencyBureau`=="Census")
+census_ngdamd <- api_MDfiles %>% filter(`NGDAID` > 0 & `AgencyBureau`=="Census")
+
+# Non-NGDA Summaries:
+noaa_non_ngdar <- api_results %>% filter(`NGDAID` == 0 & `AgencyBureau`=="NOAA")
+noaa_non_ngdaqc <- api_qcresults %>% filter(`NGDAID` == 0 & `AgencyBureau`=="NOAA")
+noaa_non_ngdamd <- api_MDfiles %>% filter(`NGDAID` == 0 & `AgencyBureau`=="NOAA")
+census_non_ngdar <- api_results %>% filter(`NGDAID` == 0 & `AgencyBureau`=="Census")
+census_non_ngdaqc <- api_qcresults %>% filter(`NGDAID` == 0 & `AgencyBureau`=="Census")
+census_non_ngdamd <- api_MDfiles %>% filter(`NGDAID` == 0 & `AgencyBureau`=="Census")
+
+# By-Bureau breakout of results:------------------------------------------------
+# Copy over results and QC scores by bureau
+noaadgovresults <- filter(api_results,`AgencyBureau` == "NOAA")
+censusdgovresults <- filter(api_results,`AgencyBureau` == "Census")
+osl <- api_qcresults %>% select(`RunID`,`AgencyBureau`,`NGDAID`, matches("-[Ss]core")) %>% gather(Description,value,`Title-Score`:`Keywords-Score`)
+# oslqc <- api_qcresults %>% gather(Description,value,c(`AgencyBureau`, `QC-Score`))
+# oslqc <- api_qcresults %>% pivot_longer(c(`AgencyBureau`, `QC-Score`), names_to = "key", values_to = "value")
+noaaqc <- filter(api_qcresults, `AgencyBureau` == "NOAA")
+noaascores <- noaaqc %>% select(matches("-[Ss]core"))
+noaaexist <- noaaqc %>% select(matches("[Ee]xists"))
+noaadl <- noaadgovresults %>% select(matches("Download URL|NGDAID|Web Service URL"))
+censusqc <- filter(api_qcresults, `AgencyBureau` == "Census")
+censusscores <- censusqc %>% select(`NGDAID`, matches("-[Ss]core"))
+
+# Saving Results:---------------------------------------------------------------
+save.image(paste0(str_extract(Sys.time(),ymd_regex),"_Prod_",sprintf("00%d",fileindexer),".Rdata"))
+gc()
+finishtime <- proc.time()
+runtimeduration <- (finishtime - starttime)[[3]]
+print(runtimeduration)
+data.table::fwrite(api_results,paste0(str_extract(Sys.time(),ymd_regex),"_API_Results_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(api_qcresults,paste0(str_extract(Sys.time(),ymd_regex),"_API_QCResults_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(api_MDfiles,paste0(str_extract(Sys.time(),ymd_regex),"_API_MDfiles_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(census_ngdar,paste0(str_extract(Sys.time(),ymd_regex),"_CensusNGDA_Results_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(census_ngdaqc,paste0(str_extract(Sys.time(),ymd_regex),"_CensusNGDA_QCResults_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(census_ngdamd,paste0(str_extract(Sys.time(),ymd_regex),"_CensusNGDA_MDfiles_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(noaa_ngdar,paste0(str_extract(Sys.time(),ymd_regex),"_NOAANGDA_Results_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(noaa_ngdaqc,paste0(str_extract(Sys.time(),ymd_regex),"_NOAANGDA_QCResults_",sprintf("00%d",fileindexer),".csv"))
+gc()
+data.table::fwrite(noaa_ngdamd,paste0(str_extract(Sys.time(),ymd_regex),"_NOAANGDA_MDfiles_",sprintf("00%d",fileindexer),".csv"))
+
+# Invalid Dates Tests:----------------------------------------------------------
+# Invalid Publication Date Test:
+invld_dpubs <- str_which(api_qcresults$`D-PubDate-Exists` * !api_qcresults$`D-PubDate-Valid`,"1")
+num_invld_dpubs <- length(invld_dpubs)
+api_results$`Publication Date (Data)`[invld_dpubs]
+api_results$AgencyBureau[invld_dpubs]
+# Invalid Creation Date Test:
+invld_dcreate <- str_which(api_qcresults$`D-CreateDate-Exists` * !api_qcresults$`D-CreateDate-Valid`,"1")
+num_invld_dcreate <- length(invld_dcreate)
+api_results$`Creation Date (Data)`[invld_dcreate]
+api_results$AgencyBureau[invld_dcreate]
+# Invalid Last Update/Revision Date Test:
+invld_dlupdate <- str_which(api_qcresults$`D-LUpDate-Exists` * !api_qcresults$`D-LUpDate-Valid`,"1")
+num_invld_dlupdate <- length(invld_dpubs)
+api_results$`Last Update Date (Data)`[invld_dlupdate]
+api_results$AgencyBureau[invld_dlupdate]
+# Invalid Metadata Publication Date Test:
+invld_mdpubs <- str_which(api_qcresults$`MD-PubDate-Exists` * !api_qcresults$`MD-PubDate-Valid`,"1")
+num_invld_mddpubs <- length(invld_mdpubs)
+api_results$`Publication Date (Metadata)`[invld_mdpubs]
+api_results$AgencyBureau[invld_mdpubs]
+# Invalid Metadata Last Update Date Test:
+invld_mdlupdate <- str_which(api_qcresults$`MD-LUpDate-Exists` * !api_qcresults$`MD-LUpDate-Valid`,"1")
+num_invld_mdlupdate <- length(invld_mdlupdate)
+api_results$`Last Update Date (Metadata)`[invld_mdlupdate]
+api_results$AgencyBureau[invld_mdlupdate]
+# Invalid Temporal Extent Begin Date Test:
+invld_tebegin <- str_which(api_qcresults$`D-TEBegin-Exists` * !api_qcresults$`D-TEBegin-Valid`,"1")
+noaa_invld_tebegin <- str_which(noaaqc$`D-TEBegin-Exists` * !noaaqc$`D-TEBegin-Valid`,"1")
+census_invld_tebegin <- str_which(censusqc$`D-TEBegin-Exists` * !censusqc$`D-TEBegin-Valid`,"1")
+num_invld_tebegin <- length(invld_tebegin)
+num_noaa_invld_tebegin <- length(noaa_invld_tebegin)
+num_census_invld_tebegin <- length(census_invld_tebegin)
+# head(api_results$Temporalextent_begin[invld_tebegin])
+# head(noaadgovresults$Temporalextent_begin[noaa_invld_tebegin])
+# head(censusdgovresults$Temporalextent_begin[census_invld_tebegin])
+# xtabs(~d8format,datevalidation(noaadgovresults$Temporalextent_begin[noaa_invld_tebegin]))
+noaa_invld_tebegin_bins <- xtabs(~`D-TEBegin-Format`,noaaqc[noaa_invld_tebegin,])
+census_invld_tebegin_bins <- xtabs(~`D-TEBegin-Format`,censusqc[census_invld_tebegin,])
+print(paste0("Invalid TE-Begin Date bins: NOAA and Census"))
+print(c("NOAA: ",num_noaa_invld_tebegin,noaa_invld_tebegin_bins,"| Census: ",num_census_invld_tebegin,census_invld_tebegin_bins))
+
+# Invalid Temporal Extent End Date Test:
+invld_teend <- str_which(api_qcresults$`D-TEEnd-Exists` * !api_qcresults$`D-TEEnd-Valid`,"1")
+noaa_invld_teend <- str_which(noaaqc$`D-TEEnd-Exists` * !noaaqc$`D-TEEnd-Valid`,"1")
+census_invld_teend <- str_which(censusqc$`D-TEEnd-Exists` * !censusqc$`D-TEEnd-Valid`,"1")
+num_invld_teend <- length(invld_teend)
+num_noaa_invld_teend <- length(noaa_invld_teend)
+num_census_invld_teend <- length(census_invld_teend)
+# head(api_results$Temporalextent_end[invld_teend])
+# head(api_results$AgencyBureau[invld_teend])
+noaa_invld_teend_bins <- xtabs(~`D-TEBegin-Format`,noaaqc[noaa_invld_teend,])
+census_invld_teend_bins <- xtabs(~`D-TEBegin-Format`,censusqc[census_invld_teend,])
+print(paste0("Invalid TE-End Date bins: NOAA and Census"))
+print(c("NOAA: ",num_noaa_invld_teend,noaa_invld_teend_bins,"| Census: ",num_census_invld_teend,census_invld_teend_bins))
+
+# Runtime duration print:-------------------------------------------------------
+finishtime <- proc.time()
+runtimeduration <- (finishtime - starttime)[[3]]
+print(runtimeduration)
+
+# Final Cleanup for Image write:------------------------------------------------
+# Final cleanup for NOAA-Census' file write-out
+keepvars <- c("fileindexer","ymd_regex","keepvars","exist","api_qcresults","api_results","api_MDfiles","census_ngdamd","census_ngdaqc","census_ngdar","census_non_ngdamd","census_non_ngdaqc","census_non_ngdar","censusqc", "censusscores","csl","noaa_ngdamd","noaa_ngdaqc","noaa_ngdar","noaa_non_ngdamd","noaa_non_ngdaqc","noaa_non_ngdar","noaaqc","noaadgovresults","censusdgovresults","noaascores","noaaexist","officialngdalist","ngdalist","noaadl","censusdl")
+rm(list = setdiff(ls(),keepvars))
+rm(keepvars)
+gc()
