@@ -1,7 +1,11 @@
 ReadMe: ‘DataGov_API_GeoMD_Tool_v1.R’Script
+
 Andrew Beggs (General Engineer), Department of Commerce - Office of Inspector General
+
 Purpose, Source, Scope, Conclusion
+
 Purpose:
+
 This software script intends to assist the user(s) quickly and easily:
 1.
 read in data across about a number of geospatial metadata records via the Data.gov Application Programming Interface (API)
