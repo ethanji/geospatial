@@ -1,6 +1,7 @@
 ReadMe: ‘DataGov_API_GeoMD_Tool_v1.R’Script
 
 Andrew Beggs (General Engineer), Department of Commerce - Office of Inspector General
+(Shared by) Ethan Iczkovitz on behalf of Andrew.
 
 Purpose, Source, Scope, Conclusion
 
